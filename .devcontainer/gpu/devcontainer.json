@@ -1,0 +1,13 @@
+{
+	"name": "NetworkScienceGPU",
+	"image": "nvcr.io/nvidia/dgl:25.08-py3",
+
+	"customizations": {
+      "vscode": {
+        "extensions": [
+			"ms-python.python",
+			"ms-vsliveshare.vsliveshare"
+		]
+      }
+    }	
+}
