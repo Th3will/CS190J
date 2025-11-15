@@ -9,5 +9,8 @@
 			"ms-vsliveshare.vsliveshare"
 		]
       }
-    }	
+    },
+	"mounts": [
+      "type=volume,target=${containerWorkspaceFolder}/.venv/"
+    ],
 }
