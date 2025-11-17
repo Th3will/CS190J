@@ -36,6 +36,9 @@ from scipy.sparse import coo_array
 import scipy
 
 # %%
+device = 'cpu'
+
+# %%
 random.seed(42)
 dataset = "zoo"
 
@@ -57,16 +60,17 @@ elif dataset == "zoo":
     num_nodes = df.shape[0]
     ## remove the animal names column
     df_bool_matrix = df.drop(columns=["animal","legs","type"]).values.tolist()
+
     df_bool_matrix = list(map(lambda x: list(map(int, x)), df_bool_matrix))
     df_neg_bool_matrix = list(map(lambda x: list(map(lambda y: -y + 1, x)), df_bool_matrix))
-    df_legs = df["legs"].to_list()
-    for i in [0,2,4,5,6,8]:
-        df_bool_matrix = np.concatenate([df_bool_matrix, np.array(list(map(lambda x: 1 if x == i else 0, df_legs))).reshape(-1,1)], axis=1)
-    df_legs = list(map(lambda x: [x], df_legs))
-    incidence_1 = np.concatenate([df_bool_matrix, df_neg_bool_matrix], axis=1)
+
+    ## process legs
+    leg_values = [0,2,4,5,6,8]
+    df_legs = pd.DataFrame({"%d legs" % i : df["legs"] == i for i in leg_values}, index=df.index)
+    
+    incidence_1 = np.concatenate([df_bool_matrix, df_neg_bool_matrix, df_legs], axis=1)
     x_0s = np.zeros(shape=(num_nodes,0))
     # pos_hypergraph = xgi.convert.from_incidence_matrix(df_bool_matrix)
-    
 
     # calculate incidence matrix
     # incidence_1 = coo_array(np.array(df_nodes))
@@ -209,8 +213,25 @@ class Network(torch.nn.Module):
         x = torch.max(x_0, dim=0)[0] if self.out_pool is True else x_0
 
         return self.linear(x)
-    
-    # Base model hyperparameters
+
+
+# %%
+## add encodings
+
+
+
+
+# %% 
+
+
+x_0s = torch.tensor(x_0s)
+x_0s, incidence_1, y = (
+    x_0s.float().to(device),
+    torch.tensor(incidence_1).to_sparse().float().to(device),
+    torch.tensor(y, dtype=torch.long).to(device),
+)
+
+# Base model hyperparameters
 in_channels = x_0s.shape[1]
 hidden_channels = 128
 
@@ -222,6 +243,7 @@ mlp_num_layers = 2
 out_channels = torch.unique(y).shape[0]
 task_level = "graph" if out_channels == 1 else "node"
 
+# %%
 
 model = Network(
     in_channels=in_channels,
@@ -243,20 +265,14 @@ loss_fn = torch.nn.CrossEntropyLoss()
 def acc_fn(y, y_hat):
     return (y == y_hat).float().mean()
 
-x_0s = torch.tensor(x_0s)
-x_0s, incidence_1, y = (
-    x_0s.float().to(device),
-    incidence_1.float().to(device),
-    torch.tensor(y, dtype=torch.long).to(device),
-)
-
 
 
 # create masking for training
 TRAIN_TEST_SPLIT_RATIO = 0.8
-train_mask = [1]*int(len(df)*TRAIN_TEST_SPLIT_RATIO) + [0]*int(len(df)*(1-TRAIN_TEST_SPLIT_RATIO))
+trainSize = int(len(df)*TRAIN_TEST_SPLIT_RATIO)
+train_mask = [1]*int(trainSize) + [0]*int(len(df)-trainSize)
 random.shuffle(train_mask)
-test_mask = [not x for x in train_mask]
+test_mask = [0 if x == 1 else 1 for x in train_mask]
 
 test_interval = 1
 num_epochs = 5
@@ -290,3 +306,5 @@ for epoch_i in range(1, num_epochs + 1):
             f"Test_loss: {loss:.4f}, Test_acc: {acc_fn(y_hat[test_mask].argmax(1), y[test_mask]):.4f}",
             flush=True,
         )
+
+# %%
