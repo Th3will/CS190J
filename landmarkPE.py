@@ -20,12 +20,22 @@ import torch.nn.functional as F
 
 import torch_geometric.transforms as T
 
+import numpy as np
+import torch
+import torch_geometric.datasets as geom_datasets
+from torch_geometric.utils import to_undirected
+
+from topomodelx.nn.hypergraph.allset_transformer import AllSetTransformer
+
 import xgi # for working with hypergraphs
 
 import pandas as pd
 import random
+import numpy as np
+from scipy.sparse import coo_array
 
 # %%
+random.seed(42)
 # Parsing the walmart set:
 df = pd.read_csv('data/walmart-hyperedges.tsv', sep='\t')
 
@@ -49,7 +59,7 @@ df_triptype_labels = list(map(int, df_triptype_labels))
 H = xgi.Hypergraph()
 # print("num nodes:", num_nodes)
 # H.add_nodes_from(range(num_nodes))
-use_toy = True
+use_toy = False
 if use_toy:
     he_nodes = [[1,3],
 [1,2,8],
@@ -57,6 +67,8 @@ if use_toy:
 [2,5,6],
 [3,6,7],
 [7,9]]
+    s = set([x for sub_arry in he_nodes for x in sub_arry])
+    H.add_nodes_from(s)
     for he in he_nodes:
         H.add_edge(he)
 else:
@@ -67,6 +79,7 @@ else:
     if 0 in H.nodes:
         H.remove_node(0)
 
+
 # %%
 if use_toy:
     xgi.draw(H,node_labels=True, node_size=15)  # visualize the hypergraph
@@ -75,185 +88,169 @@ else:
 e = xgi.convert.to_incidence_matrix(H)  # get incidence matrix
 e.toarray()  # convert to dense array
 
-# %%
-C = e.T @ e # hyper-edge "adjacency" matrix
-# C_hat is defined by just the diagonal of C
-C_hat = C * torch.eye(C.shape[0])
+#%%
+def hypergraph_random_walk(incidence_matrix):
+    C = incidence_matrix.T @ incidence_matrix # hyper-edge "adjacency" matrix
+    # C_hat is defined by just the diagonal of C
+    C_hat = C * torch.eye(C.shape[0])
 
-adj_mat = e @ e.T
-transition_mat =  e @ C_hat @ e.T - adj_mat
-# zero diagonals
-transition_mat.fill_diagonal_(0)
-print("Transition matrix:\n", transition_mat.toarray())
+    adj_mat = incidence_matrix @ incidence_matrix.T
+    transition_mat =  incidence_matrix @ C_hat @ incidence_matrix.T - adj_mat
+    # zero diagonals
+    transition_mat.setdiag(0)
+    return transition_mat/transition_mat.sum(axis=1)
 
-# %%
-sum(transition_mat[0].toarray())
+def anchor_positional_encoding(incidence_matrix, anchor_nodes, iterations):
+    transition_mat = hypergraph_random_walk(incidence_matrix)
+    
+    ary = []
+    if len(anchor_nodes) == 0:
+        print("No anchor nodes provided, returning zero positional encoding")
+        return torch.zeros(incidence_matrix.shape[0], 0)
+    
+    # initialize anchor node matrix which is a one-hot encoding of the anchor nodes
+    for node in anchor_nodes:
+        temp = np.zeros(transition_mat.shape[0])
+        temp[node] = 1
+        ary.append(temp)
+    anchor_node = torch.tensor(ary).T  # shape: num_nodes x num_anchors
+    
+    # perform random walk for specified iterations
+    for _ in range(iterations):
+        anchor_node = transition_mat @ anchor_node
 
-# %%
-for i in range(4):
-    print(sum(transition_mat[i].toarray()))
+    return torch.tensor(anchor_node)
 
-# %%
-random.seed(42)
-# multiply by a one hot array where only the first position is 1
-anchor_node = torch.zeros((transition_mat.shape[0], 1))
-for t in range(4):
-    anchor_node[random.choice(range(transition_mat.shape[0]))] = 1
-
-random_walks = anchor_node
-for _ in range(10):
-    random_walks = transition_mat @ random_walks
-
-random_walks
-
-# %%
+# %% Actual ML stuff
+# Where do we go from here?
+# 1. Need to perform a baseline hypergraph transformer without positional encoding
+    # I don't know how to input variable sized data into a transformer
 
 
-# ------------------------------------------------------------
-# Base Positional Encoding Interface
-# ------------------------------------------------------------
-class PositionalEncoding(nn.Module):
-    def forward(self, x, hypergraph):
-        raise NotImplementedError("Implement in subclass")
+class Network(torch.nn.Module):
+    """Network class that initializes the AllSet model and readout layer.
 
-# ------------------------------------------------------------
-# Random Walk Positional Encoding
-# ------------------------------------------------------------
-class RandomWalkPE(PositionalEncoding):
-    def __init__(self, pe_dim, num_walks=10, walk_length=5):
+    Base model parameters:
+    ----------
+    Reqired:
+    in_channels : int
+        Dimension of the input features.
+    hidden_channels : int
+        Dimension of the hidden features.
+
+    Optitional:
+    **kwargs : dict
+        Additional arguments for the base model.
+
+    Readout layer parameters:
+    ----------
+    out_channels : int
+        Dimension of the output features.
+    task_level : str
+        Level of the task. Either "graph" or "node".
+    """
+
+    def __init__(
+        self, in_channels, hidden_channels, out_channels, task_level="graph", **kwargs
+    ):
         super().__init__()
-        self.pe_dim = pe_dim
-        self.num_walks = num_walks
-        self.walk_length = walk_length
-        self.embed = nn.Embedding(10000, pe_dim)  # dynamically sized in practice
 
-    def generate_random_walks(self, hypergraph):
-        H = hypergraph.incidence_matrix
-        num_nodes = H.size(0)
-        node_neighbors = (H @ H.T > 0).float()  # simple node-node adjacency
-
-        walks = []
-        for start_node in range(num_nodes):
-            for _ in range(self.num_walks):
-                walk = [start_node]
-                current = start_node
-                for _ in range(self.walk_length - 1):
-                    probs = node_neighbors[current]
-                    probs[current] = 0  # no self-loops
-                    if probs.sum() == 0:
-                        break
-                    next_node = torch.multinomial(probs, 1).item()
-                    walk.append(next_node)
-                    current = next_node
-                walks.append(walk)
-        return walks
-
-    def forward(self, x, hypergraph):
-        # Generate random walks (could be cached for efficiency)
-        walks = self.generate_random_walks(hypergraph)
-
-        # Map node occurrences to embeddings
-        node_walks = [[] for _ in range(hypergraph.num_nodes)]
-        for walk in walks:
-            for node in walk:
-                node_walks[node].append(torch.tensor(walk))
-
-        pe = torch.zeros((hypergraph.num_nodes, self.pe_dim), device=x.device)
-        for i, walk_list in enumerate(node_walks):
-            if len(walk_list) == 0:
-                continue
-            emb = torch.stack([
-                self.embed(walk.to(x.device)).mean(dim=0) for walk in walk_list
-            ])
-            pe[i] = emb.mean(dim=0)
-        return torch.cat([x, pe], dim=-1)
-
-# ------------------------------------------------------------
-# Hypergraph Transformer Layer
-# ------------------------------------------------------------
-class HypergraphTransformerLayer(nn.Module):
-    def __init__(self, in_dim, out_dim, num_heads=4, dropout=0.1):
-        super().__init__()
-        self.num_heads = num_heads
-        self.attn = nn.MultiheadAttention(out_dim, num_heads, dropout=dropout)
-        self.linear_in = nn.Linear(in_dim, out_dim)
-        self.ff = nn.Sequential(
-            nn.Linear(out_dim, out_dim * 4),
-            nn.ReLU(),
-            nn.Linear(out_dim * 4, out_dim)
+        # Define the model
+        self.base_model = AllSetTransformer(
+            in_channels=in_channels, hidden_channels=hidden_channels, **kwargs
         )
-        self.norm1 = nn.LayerNorm(out_dim)
-        self.norm2 = nn.LayerNorm(out_dim)
-        self.dropout = nn.Dropout(dropout)
 
-    def forward(self, x, hypergraph):
-        H = hypergraph.incidence_matrix
-        node2edge = H.T @ x  # aggregate nodes to hyperedges
-        edge2node = H @ node2edge  # propagate back
+        # Readout
+        self.linear = torch.nn.Linear(hidden_channels, out_channels)
+        self.out_pool = task_level == "graph"
 
-        # project edge features to attention embedding
-        q = k = v = self.linear_in(edge2node)
-        attn_out, _ = self.attn(q.unsqueeze(1), k.unsqueeze(1), v.unsqueeze(1))
-        attn_out = attn_out.squeeze(1)
+    def forward(self, x_0, incidence_1):
+        # Base model
+        x_0, x_1 = self.base_model(x_0, incidence_1)
 
-        # project node features to the same embedding dim so residual addition matches
-        node_proj = self.linear_in(x)
-        x = self.norm1(node_proj + self.dropout(attn_out))
+        # Pool over all nodes in the hypergraph
+        x = torch.max(x_0, dim=0)[0] if self.out_pool is True else x_0
 
-        ff_out = self.ff(x)
-        x = self.norm2(x + self.dropout(ff_out))
-        return x
+        return self.linear(x)
+    
+    # Base model hyperparameters
+in_channels = x_0s.shape[1]
+hidden_channels = 128
 
-# ------------------------------------------------------------
-# Full Hypergraph Transformer Model
-# ------------------------------------------------------------
-class HGNNTransformer(nn.Module):
-    def __init__(self, in_dim, hidden_dim, out_dim, pe_module, num_layers=2):
-        super().__init__()
-        self.pe_module = pe_module
-        self.layers = nn.ModuleList([
-            HypergraphTransformerLayer(
-                in_dim + getattr(pe_module, "pe_dim", 0) if i == 0 else hidden_dim,
-                hidden_dim
-            )
-            for i in range(num_layers)
-        ])
-        self.output = nn.Linear(hidden_dim, out_dim)
+heads = 4
+n_layers = 1
+mlp_num_layers = 2
 
-    def forward(self, x, hypergraph):
-        x = self.pe_module(x, hypergraph)
-        for layer in self.layers:
-            x = layer(x, hypergraph)
-        return self.output(x)
-
-# ------------------------------------------------------------
-# Dummy Hypergraph Data
-# ------------------------------------------------------------
-class DummyHypergraph:
-    def __init__(self, H):
-        self.incidence_matrix = H
-        self.num_nodes = H.size(0)
-        self.num_hyperedges = H.size(1)
-
-# ------------------------------------------------------------
-# Example Usage
-# ------------------------------------------------------------
-if __name__ == "__main__":
-    num_nodes = 10
-    num_hyperedges = 4
-    in_dim = 8
-    pe_dim = 6
-    hidden_dim = 32
-    out_dim = 5
-
-    x = torch.randn(num_nodes, in_dim)
-    H = torch.randint(0, 2, (num_nodes, num_hyperedges)).float()
-    hypergraph = DummyHypergraph(H)
-
-    pe = RandomWalkPE(pe_dim)
-    model = HGNNTransformer(in_dim, hidden_dim, out_dim, pe, num_layers=2)
-    out = model(x, hypergraph)
-    print("Output shape:", out.shape)
+# Readout hyperparameters
+out_channels = torch.unique(y).shape[0]
+task_level = "graph" if out_channels == 1 else "node"
 
 
+model = Network(
+    in_channels=in_channels,
+    hidden_channels=hidden_channels,
+    out_channels=out_channels,
+    n_layers=n_layers,
+    mlp_num_layers=mlp_num_layers,
+    task_level=task_level,
+).to(device)
 
+# Optimizer and loss
+opt = torch.optim.Adam(model.parameters(), lr=0.01)
+
+# Categorial cross-entropy loss
+loss_fn = torch.nn.CrossEntropyLoss()
+
+
+# Accuracy
+def acc_fn(y, y_hat):
+    return (y == y_hat).float().mean()
+
+x_0s = torch.tensor(x_0s)
+x_0s, incidence_1, y = (
+    x_0s.float().to(device),
+    incidence_1.float().to(device),
+    torch.tensor(y, dtype=torch.long).to(device),
+)
+
+
+test_interval = 1
+num_epochs = 5
+
+epoch_loss = []
+for epoch_i in range(1, num_epochs + 1):
+    model.train()
+
+    opt.zero_grad()
+
+    # Extract edge_index from sparse incidence matrix
+    y_hat = model(x_0s, incidence_1)
+    loss = loss_fn(y_hat[train_mask], y[train_mask])
+
+    loss.backward()
+    opt.step()
+    epoch_loss.append(loss.item())
+
+    if epoch_i % test_interval == 0:
+        model.eval()
+        y_hat = model(x_0s, incidence_1)
+
+        loss = loss_fn(y_hat[train_mask], y[train_mask])
+        print(f"Epoch: {epoch_i} ")
+        print(
+            f"Train_loss: {np.mean(epoch_loss):.4f}, acc: {acc_fn(y_hat[train_mask].argmax(1), y[train_mask]):.4f}",
+            flush=True,
+        )
+
+        loss = loss_fn(y_hat[val_mask], y[val_mask])
+
+        print(
+            f"Val_loss: {loss:.4f}, Val_acc: {acc_fn(y_hat[val_mask].argmax(1), y[val_mask]):.4f}",
+            flush=True,
+        )
+
+        loss = loss_fn(y_hat[test_mask], y[test_mask])
+        print(
+            f"Test_loss: {loss:.4f}, Test_acc: {acc_fn(y_hat[test_mask].argmax(1), y[test_mask]):.4f}",
+            flush=True,
+        )
