@@ -36,6 +36,9 @@ from scipy.sparse import coo_array
 import scipy
 
 # %%
+device = 'cpu'
+
+# %%
 random.seed(42)
 dataset = "zoo"
 
@@ -53,20 +56,21 @@ if dataset == "walmart":
     y = df_triptype_labels
 elif dataset == "zoo":
     df = pd.read_csv('data/zoo/zoo.data')
-    y = df["type"].to_list()
+    y = [i - 1 for i in df["type"].to_list()]
     num_nodes = df.shape[0]
     ## remove the animal names column
     df_bool_matrix = df.drop(columns=["animal","legs","type"]).values.tolist()
+
     df_bool_matrix = list(map(lambda x: list(map(int, x)), df_bool_matrix))
     df_neg_bool_matrix = list(map(lambda x: list(map(lambda y: -y + 1, x)), df_bool_matrix))
-    df_legs = df["legs"].to_list()
-    for i in [0,2,4,5,6,8]:
-        df_bool_matrix = np.concatenate([df_bool_matrix, np.array(list(map(lambda x: 1 if x == i else 0, df_legs))).reshape(-1,1)], axis=1)
-    df_legs = list(map(lambda x: [x], df_legs))
-    incidence_1 = np.concatenate([df_bool_matrix, df_neg_bool_matrix], axis=1)
+
+    ## process legs
+    leg_values = [0,2,4,5,6,8]
+    df_legs = pd.DataFrame({"%d legs" % i : df["legs"] == i for i in leg_values}, index=df.index)
+    
+    incidence_1 = np.concatenate([df_bool_matrix, df_neg_bool_matrix, df_legs], axis=1)
     x_0s = np.zeros(shape=(num_nodes,0))
     # pos_hypergraph = xgi.convert.from_incidence_matrix(df_bool_matrix)
-    
 
     # calculate incidence matrix
     # incidence_1 = coo_array(np.array(df_nodes))
@@ -79,38 +83,40 @@ if subset:
 
 
 # %%
-# Create a Hypergraph from Walmart Data, using xgi
-H = xgi.Hypergraph()
-# print("num nodes:", num_nodes)
-# H.add_nodes_from(range(num_nodes))
-use_toy = False
-if use_toy:
-    he_nodes = [[1,3],
-[1,2,8],
-[1,2,4,5],
-[2,5,6],
-[3,6,7],
-[7,9]]
-    s = set([x for sub_arry in he_nodes for x in sub_arry])
-    H.add_nodes_from(s)
-    for he in he_nodes:
-        H.add_edge(he)
-else:
-    for he_nodes in df_nodes:
-        H.add_edge(he_nodes)
+if dataset == "walmart":
+    # Create a Hypergraph from Walmart Data, using xgi
+    H = xgi.Hypergraph()
+    # print("num nodes:", num_nodes)
+    # H.add_nodes_from(range(num_nodes))
+    use_toy = False
+    if use_toy:
+        he_nodes = [[1,3],
+    [1,2,8],
+    [1,2,4,5],
+    [2,5,6],
+    [3,6,7],
+    [7,9]]
+        s = set([x for sub_arry in he_nodes for x in sub_arry])
+        H.add_nodes_from(s)
+        for he in he_nodes:
+            H.add_edge(he)
+    else:
+        for he_nodes in df_nodes:
+            H.add_edge(he_nodes)
 
-    #remove node 0 if it exists
-    if 0 in H.nodes:
-        H.remove_node(0)
+        #remove node 0 if it exists
+        if 0 in H.nodes:
+            H.remove_node(0)
 
 
 # %%
-if use_toy:
-    xgi.draw(H,node_labels=True, node_size=15)  # visualize the hypergraph
-else:
-    xgi.draw(H)  # visualize the hypergraph
-e = xgi.convert.to_incidence_matrix(H)  # get incidence matrix
-e.toarray()  # convert to dense array
+if dataset == "walmart":
+    if use_toy:
+        xgi.draw(H,node_labels=True, node_size=15)  # visualize the hypergraph
+    else:
+        xgi.draw(H)  # visualize the hypergraph
+    e = xgi.convert.to_incidence_matrix(H)  # get incidence matrix
+    e.toarray()  # convert to dense array
 
 #%%
 def hypergraph_random_walk(incidence_matrix):
@@ -209,9 +215,37 @@ class Network(torch.nn.Module):
         x = torch.max(x_0, dim=0)[0] if self.out_pool is True else x_0
 
         return self.linear(x)
-    
-    # Base model hyperparameters
-in_channels = x_0s.shape[1]
+
+
+# %%
+x_0s = torch.tensor(x_0s)
+
+numClasses = np.max(y) + 1
+oneHotY = np.zeros((len(y), numClasses))
+oneHotY[np.arange(len(y)), y] = 1
+
+# %%
+## add encodings
+
+# anchor = anchor_positional_encoding(
+#     incidence_matrix=incidence_1, 
+#     anchor_nodes=np.random.choice(np.arange(num_nodes), size=4, replace=False),
+#     iterations=4
+# )
+arnoldis = arnoldi_encoding(hypergraph=xgi.Hypergraph(incidence_1), k=10)
+x = np.concatenate([x_0s, arnoldis], axis=1)
+
+# %% 
+
+x, incidence_1, y = (
+    torch.tensor(x).float().to(device),
+    torch.tensor(incidence_1).to_sparse().float().to(device),
+    torch.tensor(oneHotY).to(device),
+)
+
+
+# Base model hyperparameters
+in_channels = x.shape[1]
 hidden_channels = 128
 
 heads = 4
@@ -219,9 +253,11 @@ n_layers = 1
 mlp_num_layers = 2
 
 # Readout hyperparameters
-out_channels = torch.unique(y).shape[0]
+out_channels = y.shape[1]
 task_level = "graph" if out_channels == 1 else "node"
 
+
+# %%
 
 model = Network(
     in_channels=in_channels,
@@ -241,25 +277,19 @@ loss_fn = torch.nn.CrossEntropyLoss()
 
 # Accuracy
 def acc_fn(y, y_hat):
-    return (y == y_hat).float().mean()
-
-x_0s = torch.tensor(x_0s)
-x_0s, incidence_1, y = (
-    x_0s.float().to(device),
-    incidence_1.float().to(device),
-    torch.tensor(y, dtype=torch.long).to(device),
-)
+    return (y.argmax(dim=1) == y_hat.argmax(dim=1)).float().mean()
 
 
 
 # create masking for training
 TRAIN_TEST_SPLIT_RATIO = 0.8
-train_mask = [1]*int(len(df)*TRAIN_TEST_SPLIT_RATIO) + [0]*int(len(df)*(1-TRAIN_TEST_SPLIT_RATIO))
+trainSize = int(len(df)*TRAIN_TEST_SPLIT_RATIO)
+train_mask = [True]*int(trainSize) + [False]*int(len(df)-trainSize)
 random.shuffle(train_mask)
 test_mask = [not x for x in train_mask]
 
 test_interval = 1
-num_epochs = 5
+num_epochs = 100
 epoch_loss = []
 for epoch_i in range(1, num_epochs + 1):
     model.train()
@@ -267,7 +297,7 @@ for epoch_i in range(1, num_epochs + 1):
     opt.zero_grad()
 
     # Extract edge_index from sparse incidence matrix
-    y_hat = model(x_0s, incidence_1)
+    y_hat = model(x, incidence_1)
     loss = loss_fn(y_hat[train_mask], y[train_mask])
 
     loss.backward()
@@ -276,17 +306,24 @@ for epoch_i in range(1, num_epochs + 1):
 
     if epoch_i % test_interval == 0:
         model.eval()
-        y_hat = model(x_0s, incidence_1)
+        y_hat = model(x, incidence_1)
 
         loss = loss_fn(y_hat[train_mask], y[train_mask])
         print(f"Epoch: {epoch_i} ")
         print(
-            f"Train_loss: {np.mean(epoch_loss):.4f}, acc: {acc_fn(y_hat[train_mask].argmax(1), y[train_mask]):.4f}",
+            f"Train_loss: {np.mean(epoch_loss):.4f}, acc: {acc_fn(y_hat[train_mask], y[train_mask]):.4f}",
             flush=True,
         )
 
         loss = loss_fn(y_hat[test_mask], y[test_mask])
         print(
-            f"Test_loss: {loss:.4f}, Test_acc: {acc_fn(y_hat[test_mask].argmax(1), y[test_mask]):.4f}",
+            f"Test_loss: {loss:.4f}, Test_acc: {acc_fn(y_hat[test_mask], y[test_mask]):.4f}",
             flush=True,
         )
+
+# %%
+model.eval()
+y_hat = model(x, incidence_1)
+print(y_hat)
+
+# %%
