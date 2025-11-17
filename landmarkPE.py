@@ -232,7 +232,7 @@ oneHotY[np.arange(len(y)), y] = 1
 #     anchor_nodes=np.random.choice(np.arange(num_nodes), size=4, replace=False),
 #     iterations=4
 # )
-arnoldis = arnoldi_encoding(hypergraph=xgi.Hypergraph(incidence_1), k=4)
+arnoldis = arnoldi_encoding(hypergraph=xgi.Hypergraph(incidence_1), k=10)
 x = np.concatenate([x_0s, arnoldis], axis=1)
 
 # %% 
@@ -322,5 +322,8 @@ for epoch_i in range(1, num_epochs + 1):
         )
 
 # %%
+model.eval()
+y_hat = model(x, incidence_1)
+print(y_hat)
 
 # %%
