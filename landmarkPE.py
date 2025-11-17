@@ -33,26 +33,50 @@ import pandas as pd
 import random
 import numpy as np
 from scipy.sparse import coo_array
+import scipy
 
 # %%
 random.seed(42)
+dataset = "zoo"
+
 # Parsing the walmart set:
-df = pd.read_csv('data/walmart-hyperedges.tsv', sep='\t')
+if dataset == "walmart":
+    df = pd.read_csv('data/walmart/walmart-hyperedges.tsv', sep='\t')
+    df_nodes = df["nodes"].to_list()
+    df_nodes = list(map(lambda x: list(map(int, x.split(','))), df_nodes))
+
+    df_day_of_week_features = df["dayofweek"].to_list()
+    df_day_of_week_features = list(map(lambda x: [int(x)], df_day_of_week_features))
+
+    df_triptype_labels = df["triptype"].to_list()
+    df_triptype_labels = list(map(int, df_triptype_labels))
+    y = df_triptype_labels
+elif dataset == "zoo":
+    df = pd.read_csv('data/zoo/zoo.data')
+    y = df["type"].to_list()
+    num_nodes = df.shape[0]
+    ## remove the animal names column
+    df_bool_matrix = df.drop(columns=["animal","legs","type"]).values.tolist()
+    df_bool_matrix = list(map(lambda x: list(map(int, x)), df_bool_matrix))
+    df_neg_bool_matrix = list(map(lambda x: list(map(lambda y: -y + 1, x)), df_bool_matrix))
+    df_legs = df["legs"].to_list()
+    for i in [0,2,4,5,6,8]:
+        df_bool_matrix = np.concatenate([df_bool_matrix, np.array(list(map(lambda x: 1 if x == i else 0, df_legs))).reshape(-1,1)], axis=1)
+    df_legs = list(map(lambda x: [x], df_legs))
+    incidence_1 = np.concatenate([df_bool_matrix, df_neg_bool_matrix], axis=1)
+    x_0s = np.zeros(shape=(num_nodes,0))
+    # pos_hypergraph = xgi.convert.from_incidence_matrix(df_bool_matrix)
+    
+
+    # calculate incidence matrix
+    # incidence_1 = coo_array(np.array(df_nodes))
 
 # # TODO: REMOVE — using a subset of edges for now
-subset = True
+subset = False
 
 if subset:
     df = df[:4]
 
-df_nodes = df["nodes"].to_list()
-df_nodes = list(map(lambda x: list(map(int, x.split(','))), df_nodes))
-
-df_day_of_week_features = df["dayofweek"].to_list()
-df_day_of_week_features = list(map(lambda x: [int(x)], df_day_of_week_features))
-
-df_triptype_labels = df["triptype"].to_list()
-df_triptype_labels = list(map(int, df_triptype_labels))
 
 # %%
 # Create a Hypergraph from Walmart Data, using xgi
@@ -120,6 +144,19 @@ def anchor_positional_encoding(incidence_matrix, anchor_nodes, iterations):
         anchor_node = transition_mat @ anchor_node
 
     return torch.tensor(anchor_node)
+
+#%%
+def arnoldi_encoding(hypergraph, k : int):
+    laplacian = xgi.linalg.laplacian_matrix.normalized_hypergraph_laplacian(
+        hypergraph, 
+        sparse=True, 
+        index=False
+    )
+    k = k//2
+    kLargest = np.real(scipy.sparse.linalg.eigs(laplacian, k=k, which='LM')[1])
+    kSmallest = np.real(scipy.sparse.linalg.eigs(laplacian, k=k, which='SM')[1])
+
+    return np.concatenate((kLargest, kSmallest), axis=1)
 
 # %% Actual ML stuff
 # Where do we go from here?
@@ -214,9 +251,15 @@ x_0s, incidence_1, y = (
 )
 
 
+
+# create masking for training
+TRAIN_TEST_SPLIT_RATIO = 0.8
+train_mask = [1]*int(len(df)*TRAIN_TEST_SPLIT_RATIO) + [0]*int(len(df)*(1-TRAIN_TEST_SPLIT_RATIO))
+random.shuffle(train_mask)
+test_mask = [not x for x in train_mask]
+
 test_interval = 1
 num_epochs = 5
-
 epoch_loss = []
 for epoch_i in range(1, num_epochs + 1):
     model.train()
@@ -239,13 +282,6 @@ for epoch_i in range(1, num_epochs + 1):
         print(f"Epoch: {epoch_i} ")
         print(
             f"Train_loss: {np.mean(epoch_loss):.4f}, acc: {acc_fn(y_hat[train_mask].argmax(1), y[train_mask]):.4f}",
-            flush=True,
-        )
-
-        loss = loss_fn(y_hat[val_mask], y[val_mask])
-
-        print(
-            f"Val_loss: {loss:.4f}, Val_acc: {acc_fn(y_hat[val_mask].argmax(1), y[val_mask]):.4f}",
             flush=True,
         )
 
