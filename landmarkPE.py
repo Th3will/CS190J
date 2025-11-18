@@ -42,6 +42,10 @@ device = 'cpu'
 
 # %%
 random.seed(42)
+np.random.seed(42)
+torch.manual_seed(42)
+torch.use_deterministic_algorithms(True)
+
 dataset = "zoo"
 
 # Parsing the walmart set:
@@ -155,15 +159,25 @@ def anchor_positional_encoding(incidence_matrix, anchor_nodes, iterations):
     return torch.tensor(anchor_node)
 
 #%%
-def arnoldi_encoding(hypergraph, k : int):
+def arnoldi_encoding(hypergraph : xgi.Hypergraph, k : int, largestOnly = False):
+    if k == 0: 
+        return np.zeros((hypergraph.num_nodes,0))
+    
     laplacian = xgi.linalg.laplacian_matrix.normalized_hypergraph_laplacian(
         hypergraph, 
         sparse=True, 
         index=False
     )
-    k = k//2
-    kLargest = np.real(scipy.sparse.linalg.eigs(laplacian, k=k, which='LM')[1])
-    kSmallest = np.real(scipy.sparse.linalg.eigs(laplacian, k=k, which='SM')[1])
+
+    DETERMINISM_MATRIX = np.random.rand(laplacian.shape[0])
+
+    kSmallest = np.zeros((hypergraph.num_nodes,0))
+    if largestOnly:
+        k = k//2
+        kSmallest = np.real(scipy.sparse.linalg.eigsh(laplacian, k=k, which='SM', v0=DETERMINISM_MATRIX)[1])
+    
+    kLargest = np.real(scipy.sparse.linalg.eigsh(laplacian, k=k, which='LM', v0=DETERMINISM_MATRIX)[1])
+    
 
     return np.concatenate((kLargest, kSmallest), axis=1)
 
@@ -351,6 +365,7 @@ for use_arnoldis in bool_arnoldi:
 # Graph the results
 titles = ["Baseline", "RW-PE", "Arnoldi PE", "Arnoldi PE + RW-PE"]
 for i in range(len(epoch_train_losses)):
+    # loss plots
     plt.plot(epoch_train_losses[i], label=f"Train Loss")
     plt.plot(epoch_test_losses[i], label=f"Test Loss")
     plt.xlabel("Epochs")
@@ -358,6 +373,7 @@ for i in range(len(epoch_train_losses)):
     plt.title(f"{titles[i]} loss")
     plt.legend()
     plt.show()
+    # accuracy plots
     plt.plot(epoch_train_accs[i], label=f"Train Acc")
     plt.plot(epoch_test_accs[i], label=f"Test Acc")
     plt.xlabel("Epochs")
@@ -365,9 +381,13 @@ for i in range(len(epoch_train_losses)):
     plt.title(f"{titles[i]} accuracy")
     plt.legend()
     plt.show()
+    # confusion matrix plots
     disp = sklearn.metrics.ConfusionMatrixDisplay(confusion_matrix=confusion_matrixes[i])
     disp.plot()
     plt.title(f"{titles[i]} confusion matrix")
     plt.show()
+    # statistics
+    print(f"{titles[i]} statistics:")
+    print(f"Accuracy: {epoch_test_accs[i][-1]}")
 
 # %%
