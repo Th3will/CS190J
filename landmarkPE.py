@@ -34,6 +34,7 @@ import random
 import numpy as np
 from scipy.sparse import coo_array
 import scipy
+import sklearn.metrics
 
 # %%
 device = 'cpu'
@@ -241,11 +242,11 @@ oneHotY[np.arange(len(y)), y] = 1
 # %%
 # Hyperparameters
 
-use_arnoldis = False
+use_arnoldis = True
 eigenvectors = 10
 
 use_random_walk_pe = True
-anchorNodes = 10
+anchorNodes = 5
 numWalks = 1
 
 # %%
@@ -353,6 +354,10 @@ for epoch_i in range(1, num_epochs + 1):
             f"Test_loss: {loss:.4f}, Test_acc: {acc_fn(y_hat[test_mask], y[test_mask]):.4f}",
             flush=True,
         )
+model.eval()
+y_hat = y_hat = model(x, incidence_1).argmax(dim=1).numpy()
+cm = sklearn.metrics.confusion_matrix(y.argmax(dim=1),y_hat)
+confusion_matrixes.append(cm)
 
 # %%
 from matplotlib import pyplot as plt
@@ -364,6 +369,11 @@ plt.ylim((0, 1))
 plt.plot(np.arange(num_epochs, step=test_interval), test_accuracy, label="Test")
 plt.plot(train_accuracy, label="Train")
 plt.legend()
+
+disp = sklearn.metrics.ConfusionMatrixDisplay(confusion_matrix=cm)
+disp.plot()
+plt.title("RW+Arnoldi-PE confusion matrix")
+plt.show()
 
 # %%
 
@@ -379,5 +389,6 @@ for i, v in enumerate(test_accuracy):
     else:
         print("%f]" % v)
 
-print("},")
-# %%
+
+
+
