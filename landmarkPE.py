@@ -33,7 +33,9 @@ import pandas as pd
 import random
 import numpy as np
 from scipy.sparse import coo_array
+import sklearn.metrics
 import scipy
+import matplotlib.pyplot as plt
 
 # %%
 device = 'cpu'
@@ -144,6 +146,7 @@ def anchor_positional_encoding(incidence_matrix, anchor_nodes, iterations):
         temp[node] = 1
         ary.append(temp)
     anchor_node = np.array(ary).T  # shape: num_nodes x num_anchors
+    print(anchor_node)
     
     # perform random walk for specified iterations
     for _ in range(iterations):
@@ -225,38 +228,16 @@ oneHotY = np.zeros((len(y), numClasses))
 oneHotY[np.arange(len(y)), y] = 1
 
 # %%
-## add encodings
+# too lazy to deal with sparse tensors for now
+incidence = incidence_1
+incidence_1 = torch.tensor(incidence_1).to_sparse().float().to(device)
+y = torch.tensor(oneHotY).to(device)
+anchor_nodes = random.sample(range(incidence_1.shape[0]), k=10)
 
-# anchor = anchor_positional_encoding(
-#     incidence_matrix=incidence_1, 
-#     anchor_nodes=np.random.choice(np.arange(num_nodes), size=4, replace=False),
-#     iterations=4
-# )
-use_arnoldis = True
-use_random_walk_pe = True
-
-if use_arnoldis:
-    arnoldis = arnoldi_encoding(hypergraph=xgi.Hypergraph(incidence_1), k=10)
-    x_0s = np.concatenate([x_0s, arnoldis], axis=1)
-if use_random_walk_pe:
-    rw_pe = anchor_positional_encoding(
-        incidence_matrix=incidence_1,
-        anchor_nodes=random.sample(range(incidence_1.shape[0]), k=10),
-        iterations=10
-    ).numpy()
-    x_0s = np.concatenate([x_0s, rw_pe], axis=1)
-
-# %% 
-
-x, incidence_1, y = (
-    torch.tensor(x).float().to(device),
-    torch.tensor(incidence_1).to_sparse().float().to(device),
-    torch.tensor(oneHotY).to(device),
-)
-
+test_interval = 1
+num_epochs = 1000
 
 # Base model hyperparameters
-in_channels = x.shape[1]
 hidden_channels = 128
 
 heads = 4
@@ -267,74 +248,126 @@ mlp_num_layers = 2
 out_channels = y.shape[1]
 task_level = "graph" if out_channels == 1 else "node"
 
-
-# %%
-
-model = Network(
-    in_channels=in_channels,
-    hidden_channels=hidden_channels,
-    out_channels=out_channels,
-    n_layers=n_layers,
-    mlp_num_layers=mlp_num_layers,
-    task_level=task_level,
-).to(device)
-
-# Optimizer and loss
-opt = torch.optim.Adam(model.parameters(), lr=0.001)
-
-# Categorial cross-entropy loss
-loss_fn = torch.nn.CrossEntropyLoss()
-
-
 # Accuracy
 def acc_fn(y, y_hat):
     return (y.argmax(dim=1) == y_hat.argmax(dim=1)).float().mean()
 
-
-
-# create masking for training
+ # create masking for training
 TRAIN_TEST_SPLIT_RATIO = 0.8
 trainSize = int(len(df)*TRAIN_TEST_SPLIT_RATIO)
 train_mask = [True]*int(trainSize) + [False]*int(len(df)-trainSize)
 random.shuffle(train_mask)
 test_mask = [not x for x in train_mask]
 
-test_interval = 1
-num_epochs = 1000
-epoch_loss = []
-for epoch_i in range(1, num_epochs + 1):
-    model.train()
+epoch_train_losses = []
+epoch_test_losses = []
+epoch_train_accs = []
+epoch_test_accs = []
+confusion_matrixes = []
 
-    opt.zero_grad()
+i = 0
 
-    # Extract edge_index from sparse incidence matrix
-    y_hat = model(x, incidence_1)
-    loss = loss_fn(y_hat[train_mask], y[train_mask])
+# generate all combinations of positional encodings
+(bool_arnoldi, bool_random_walk_pe) = ([False, True], [False, True])
+for use_arnoldis in bool_arnoldi:
+    for use_random_walk_pe in bool_random_walk_pe:
+        if use_arnoldis:
+            arnoldis = arnoldi_encoding(hypergraph=xgi.Hypergraph(incidence), k=10)
+            x_0s = np.concatenate([x_0s, arnoldis], axis=1)
+        if use_random_walk_pe:
+            rw_pe = anchor_positional_encoding(
+                incidence_matrix=incidence,
+                anchor_nodes=anchor_nodes,
+                iterations=1 
+            ).numpy()
+            x_0s = np.concatenate([x_0s, rw_pe], axis=1)
 
-    loss.backward()
-    opt.step()
-    epoch_loss.append(loss.item())
+        x = torch.tensor(x_0s).float().to(device)
+        in_channels = x.shape[1]
 
-    if epoch_i % test_interval == 0:
+        model = Network(
+            in_channels=in_channels,
+            hidden_channels=hidden_channels,
+            out_channels=out_channels,
+            n_layers=n_layers,
+            mlp_num_layers=mlp_num_layers,
+            task_level=task_level,
+        ).to(device)
+
+        # Optimizer and loss
+        opt = torch.optim.Adam(model.parameters(), lr=0.001)
+
+        # Categorial cross-entropy loss
+        loss_fn = torch.nn.CrossEntropyLoss()
+        epoch_loss = []
+        epoch_train_loss = []
+        epoch_test_loss = []
+        epoch_train_acc = []
+        epoch_test_acc = []
+
+        for epoch_i in range(1, num_epochs + 1):
+            model.train()
+
+            opt.zero_grad()
+
+            # Extract edge_index from sparse incidence matrix
+            y_hat = model(x, incidence_1)
+            loss = loss_fn(y_hat[train_mask], y[train_mask])
+
+            loss.backward()
+            opt.step()
+            epoch_loss.append(loss.item())
+
+            if epoch_i % test_interval == 0:
+                model.eval()
+                y_hat = model(x, incidence_1)
+
+                loss = loss_fn(y_hat[train_mask], y[train_mask])
+                # print(f"Epoch: {epoch_i} ")
+                epoch_train_loss.append(np.mean(epoch_loss))
+                epoch_train_acc.append(acc_fn(y_hat[train_mask], y[train_mask]).item())
+                # print(
+                #     f"Train_loss: {np.mean(epoch_loss):.4f}, acc: {acc_fn(y_hat[train_mask], y[train_mask]):.4f}",
+                #     flush=True,
+                # )
+
+                loss = loss_fn(y_hat[test_mask], y[test_mask])
+                epoch_test_loss.append(loss.item())
+                epoch_test_acc.append(acc_fn(y_hat[test_mask], y[test_mask]).item())
+                # print(
+                #     f"Test_loss: {loss:.4f}, Test_acc: {acc_fn(y_hat[test_mask], y[test_mask]):.4f}",
+                #     flush=True,
+                # )
+        epoch_train_losses.append(epoch_train_loss)
+        epoch_test_losses.append(epoch_test_loss)
+        epoch_train_accs.append(epoch_train_acc)
+        epoch_test_accs.append(epoch_test_acc)
+
         model.eval()
-        y_hat = model(x, incidence_1)
-
-        loss = loss_fn(y_hat[train_mask], y[train_mask])
-        print(f"Epoch: {epoch_i} ")
-        print(
-            f"Train_loss: {np.mean(epoch_loss):.4f}, acc: {acc_fn(y_hat[train_mask], y[train_mask]):.4f}",
-            flush=True,
-        )
-
-        loss = loss_fn(y_hat[test_mask], y[test_mask])
-        print(
-            f"Test_loss: {loss:.4f}, Test_acc: {acc_fn(y_hat[test_mask], y[test_mask]):.4f}",
-            flush=True,
-        )
-
+        y_hat = y_hat = model(x, incidence_1).argmax(dim=1).numpy()
+        cm = sklearn.metrics.confusion_matrix(y.argmax(dim=1),y_hat)
+        confusion_matrixes.append(cm)
 # %%
-model.eval()
-y_hat = model(x, incidence_1)
-print(y_hat)
+# Graph the results
+titles = ["Baseline", "RW-PE", "Arnoldi PE", "Arnoldi PE + RW-PE"]
+for i in range(len(epoch_train_losses)):
+    plt.plot(epoch_train_losses[i], label=f"Train Loss")
+    plt.plot(epoch_test_losses[i], label=f"Test Loss")
+    plt.xlabel("Epochs")
+    plt.ylabel("Loss")
+    plt.title(f"{titles[i]} loss")
+    plt.legend()
+    plt.show()
+    plt.plot(epoch_train_accs[i], label=f"Train Acc")
+    plt.plot(epoch_test_accs[i], label=f"Test Acc")
+    plt.xlabel("Epochs")
+    plt.ylabel("Accuracy")
+    plt.title(f"{titles[i]} accuracy")
+    plt.legend()
+    plt.show()
+    disp = sklearn.metrics.ConfusionMatrixDisplay(confusion_matrix=confusion_matrixes[i])
+    disp.plot()
+    plt.title(f"{titles[i]} confusion matrix")
+    plt.show()
 
 # %%
