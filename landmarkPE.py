@@ -40,6 +40,10 @@ device = 'cpu'
 
 # %%
 random.seed(42)
+np.random.seed(42)
+torch.manual_seed(42)
+torch.use_deterministic_algorithms(True)
+
 dataset = "zoo"
 
 # Parsing the walmart set:
@@ -152,15 +156,25 @@ def anchor_positional_encoding(incidence_matrix, anchor_nodes, iterations):
     return torch.tensor(anchor_node)
 
 #%%
-def arnoldi_encoding(hypergraph, k : int):
+def arnoldi_encoding(hypergraph : xgi.Hypergraph, k : int, largestOnly = False):
+    if k == 0: 
+        return np.zeros((hypergraph.num_nodes,0))
+    
     laplacian = xgi.linalg.laplacian_matrix.normalized_hypergraph_laplacian(
         hypergraph, 
         sparse=True, 
         index=False
     )
-    k = k//2
-    kLargest = np.real(scipy.sparse.linalg.eigs(laplacian, k=k, which='LM')[1])
-    kSmallest = np.real(scipy.sparse.linalg.eigs(laplacian, k=k, which='SM')[1])
+
+    DETERMINISM_MATRIX = np.random.rand(laplacian.shape[0])
+
+    kSmallest = np.zeros((hypergraph.num_nodes,0))
+    if largestOnly:
+        k = k//2
+        kSmallest = np.real(scipy.sparse.linalg.eigsh(laplacian, k=k, which='SM', v0=DETERMINISM_MATRIX)[1])
+    
+    kLargest = np.real(scipy.sparse.linalg.eigsh(laplacian, k=k, which='LM', v0=DETERMINISM_MATRIX)[1])
+    
 
     return np.concatenate((kLargest, kSmallest), axis=1)
 
@@ -225,31 +239,35 @@ oneHotY = np.zeros((len(y), numClasses))
 oneHotY[np.arange(len(y)), y] = 1
 
 # %%
+# Hyperparameters
+
+use_arnoldis = False
+eigenvectors = 10
+
+use_random_walk_pe = True
+anchorNodes = 10
+numWalks = 1
+
+# %%
 ## add encodings
 
-# anchor = anchor_positional_encoding(
-#     incidence_matrix=incidence_1, 
-#     anchor_nodes=np.random.choice(np.arange(num_nodes), size=4, replace=False),
-#     iterations=4
-# )
-use_arnoldis = True
-use_random_walk_pe = True
-
+x = x_0s
 if use_arnoldis:
-    arnoldis = arnoldi_encoding(hypergraph=xgi.Hypergraph(incidence_1), k=10)
+    arnoldis = arnoldi_encoding(hypergraph=xgi.Hypergraph(incidence_1), k=eigenvectors)
     x_0s = np.concatenate([x_0s, arnoldis], axis=1)
+
 if use_random_walk_pe:
     rw_pe = anchor_positional_encoding(
         incidence_matrix=incidence_1,
-        anchor_nodes=random.sample(range(incidence_1.shape[0]), k=10),
-        iterations=10
+        anchor_nodes=random.sample(range(incidence_1.shape[0]), k=anchorNodes),
+        iterations=numWalks
     ).numpy()
     x_0s = np.concatenate([x_0s, rw_pe], axis=1)
 
 # %% 
 
 x, incidence_1, y = (
-    torch.tensor(x).float().to(device),
+    torch.tensor(x_0s).float().to(device),
     torch.tensor(incidence_1).to_sparse().float().to(device),
     torch.tensor(oneHotY).to(device),
 )
@@ -302,6 +320,8 @@ test_mask = [not x for x in train_mask]
 test_interval = 1
 num_epochs = 1000
 epoch_loss = []
+train_accuracy = []
+test_accuracy = []
 for epoch_i in range(1, num_epochs + 1):
     model.train()
 
@@ -314,6 +334,7 @@ for epoch_i in range(1, num_epochs + 1):
     loss.backward()
     opt.step()
     epoch_loss.append(loss.item())
+    train_accuracy.append(acc_fn(y_hat[train_mask], y[train_mask]))
 
     if epoch_i % test_interval == 0:
         model.eval()
@@ -325,6 +346,7 @@ for epoch_i in range(1, num_epochs + 1):
             f"Train_loss: {np.mean(epoch_loss):.4f}, acc: {acc_fn(y_hat[train_mask], y[train_mask]):.4f}",
             flush=True,
         )
+        test_accuracy.append(acc_fn(y_hat[test_mask], y[test_mask]))
 
         loss = loss_fn(y_hat[test_mask], y[test_mask])
         print(
@@ -333,8 +355,29 @@ for epoch_i in range(1, num_epochs + 1):
         )
 
 # %%
-model.eval()
-y_hat = model(x, incidence_1)
-print(y_hat)
+from matplotlib import pyplot as plt
+plt.title("Accuracy over Epochs\nRW (walk size 1, 10 anchors) PEs")
 
+plt.xlabel("Epoch")
+plt.ylabel("Accuracy")
+plt.ylim((0, 1))
+plt.plot(np.arange(num_epochs, step=test_interval), test_accuracy, label="Test")
+plt.plot(train_accuracy, label="Train")
+plt.legend()
+
+# %%
+
+print('''{
+    "eigenvectors" : %d,
+    "anchorNodes" : %d,
+    "walks" : %d,     
+    "testAcc" : ''' % (eigenvectors if use_arnoldis else -1, anchorNodes if use_random_walk_pe else -1, numWalks if use_random_walk_pe else -1), end="")
+print("[" , end="")
+for i, v in enumerate(test_accuracy):
+    if i < len(test_accuracy) - 1:
+        print("%f, " % (v) , end="")
+    else:
+        print("%f]" % v)
+
+print("},")
 # %%
