@@ -122,12 +122,12 @@ if dataset == "walmart":
 def hypergraph_random_walk(incidence_matrix):
     C = incidence_matrix.T @ incidence_matrix # hyper-edge "adjacency" matrix
     # C_hat is defined by just the diagonal of C
-    C_hat = C * torch.eye(C.shape[0])
+    C_hat = C * np.eye(C.shape[0])
 
     adj_mat = incidence_matrix @ incidence_matrix.T
     transition_mat =  incidence_matrix @ C_hat @ incidence_matrix.T - adj_mat
     # zero diagonals
-    transition_mat.setdiag(0)
+    np.fill_diagonal(transition_mat, 0)
     return transition_mat/transition_mat.sum(axis=1)
 
 def anchor_positional_encoding(incidence_matrix, anchor_nodes, iterations):
@@ -143,7 +143,7 @@ def anchor_positional_encoding(incidence_matrix, anchor_nodes, iterations):
         temp = np.zeros(transition_mat.shape[0])
         temp[node] = 1
         ary.append(temp)
-    anchor_node = torch.tensor(ary).T  # shape: num_nodes x num_anchors
+    anchor_node = np.array(ary).T  # shape: num_nodes x num_anchors
     
     # perform random walk for specified iterations
     for _ in range(iterations):
@@ -232,8 +232,19 @@ oneHotY[np.arange(len(y)), y] = 1
 #     anchor_nodes=np.random.choice(np.arange(num_nodes), size=4, replace=False),
 #     iterations=4
 # )
-arnoldis = arnoldi_encoding(hypergraph=xgi.Hypergraph(incidence_1), k=10)
-x = np.concatenate([x_0s, arnoldis], axis=1)
+use_arnoldis = True
+use_random_walk_pe = True
+
+if use_arnoldis:
+    arnoldis = arnoldi_encoding(hypergraph=xgi.Hypergraph(incidence_1), k=10)
+    x_0s = np.concatenate([x_0s, arnoldis], axis=1)
+if use_random_walk_pe:
+    rw_pe = anchor_positional_encoding(
+        incidence_matrix=incidence_1,
+        anchor_nodes=random.sample(range(incidence_1.shape[0]), k=10),
+        iterations=10
+    ).numpy()
+    x_0s = np.concatenate([x_0s, rw_pe], axis=1)
 
 # %% 
 
@@ -269,7 +280,7 @@ model = Network(
 ).to(device)
 
 # Optimizer and loss
-opt = torch.optim.Adam(model.parameters(), lr=0.01)
+opt = torch.optim.Adam(model.parameters(), lr=0.001)
 
 # Categorial cross-entropy loss
 loss_fn = torch.nn.CrossEntropyLoss()
@@ -289,7 +300,7 @@ random.shuffle(train_mask)
 test_mask = [not x for x in train_mask]
 
 test_interval = 1
-num_epochs = 100
+num_epochs = 1000
 epoch_loss = []
 for epoch_i in range(1, num_epochs + 1):
     model.train()
