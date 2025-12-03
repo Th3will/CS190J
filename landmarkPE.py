@@ -40,28 +40,65 @@ import sklearn.metrics
 device = 'cpu'
 
 # %%
+# Helpers
+def coo2Sparse(coo) -> torch.Tensor:
+    if coo is not scipy.sparse.coo_array:
+        coo = coo.tocoo()
+    indices = np.vstack((coo.row, coo.col))
+    values = coo.data
+    shape = coo.shape
+
+    i = torch.LongTensor(indices)
+    v = torch.FloatTensor(values)
+    return torch.sparse_coo_tensor(i, v, torch.Size(shape))
+
+# %%
 random.seed(42)
 np.random.seed(42)
 torch.manual_seed(42)
 torch.use_deterministic_algorithms(True)
 
-dataset = "zoo"
+dataset = "walmart"
 
 # Parsing the walmart set:
 if dataset == "walmart":
     df = pd.read_csv('data/walmart/walmart-hyperedges.tsv', sep='\t')
-    df_nodes = df["nodes"].to_list()
-    df_nodes = list(map(lambda x: list(map(int, x.split(','))), df_nodes))
+    df_hyper_edges = df["nodes"].to_list()
+    df_hyper_edges = list(map(lambda x: list(map(int, x.split(','))), df_hyper_edges))
 
     df_day_of_week_features = df["dayofweek"].to_list()
     df_day_of_week_features = list(map(lambda x: [int(x)], df_day_of_week_features))
 
     df_triptype_labels = df["triptype"].to_list()
     df_triptype_labels = list(map(int, df_triptype_labels))
-    y = df_triptype_labels
+    y = torch.Tensor(df_triptype_labels)
+
+    df = pd.read_csv('data/walmart/walmart-nodes.tsv', sep='\t')
+    df_categories = np.array(df["category"], dtype=np.int64)
+    df_nodes = df["node_id"].to_list()
+
+    # Nodes are not ordered by default in xgi so need to make sure 
+    H = xgi.Hypergraph()
+    H.add_nodes_from(df_nodes)
+    for he in df_hyper_edges:
+        H.add_edge(he)
+    incidence_1 = coo2Sparse(xgi.convert.to_incidence_matrix(H, sparse=True))
+
+    numClasses = np.argmax(df_categories) - 1
+    x_0s = torch.zeros((len(df_categories), numClasses))
+    x_0s[torch.arange(len(df_categories)), df_categories - 1] = 1
+    
+
 elif dataset == "zoo":
     df = pd.read_csv('data/zoo/zoo.data')
     y = [i - 1 for i in df["type"].to_list()]
+
+    numClasses = np.max(y) + 1
+    oneHotY = np.zeros((len(y), numClasses))
+    oneHotY[np.arange(len(y)), y] = 1
+
+    y = oneHotY
+
     num_nodes = df.shape[0]
     ## remove the animal names column
     df_bool_matrix = df.drop(columns=["animal","legs","type"]).values.tolist()
@@ -77,6 +114,7 @@ elif dataset == "zoo":
     x_0s = np.zeros(shape=(num_nodes,0))
     # pos_hypergraph = xgi.convert.from_incidence_matrix(df_bool_matrix)
 
+    incidence_1 = torch.from_numpy(incidence_1).to_sparse()
     # calculate incidence matrix
     # incidence_1 = coo_array(np.array(df_nodes))
 
@@ -87,41 +125,41 @@ if subset:
     df = df[:4]
 
 
+# # %%
+# if dataset == "walmart":
+#     # Create a Hypergraph from Walmart Data, using xgi
+#     H = xgi.Hypergraph()
+#     # print("num nodes:", num_nodes)
+#     # H.add_nodes_from(range(num_nodes))
+#     use_toy = False
+#     if use_toy:
+#         he_nodes = [[1,3],
+#     [1,2,8],
+#     [1,2,4,5],
+#     [2,5,6],
+#     [3,6,7],
+#     [7,9]]
+#         s = set([x for sub_arry in he_nodes for x in sub_arry])
+#         H.add_nodes_from(s)
+#         for he in he_nodes:
+#             H.add_edge(he)
+#     else:
+#         for he_nodes in df_nodes:
+#             H.add_edge(he_nodes)
+
+#         #remove node 0 if it exists
+#         if 0 in H.nodes:
+#             H.remove_node(0)
+
+
 # %%
-if dataset == "walmart":
-    # Create a Hypergraph from Walmart Data, using xgi
-    H = xgi.Hypergraph()
-    # print("num nodes:", num_nodes)
-    # H.add_nodes_from(range(num_nodes))
-    use_toy = False
-    if use_toy:
-        he_nodes = [[1,3],
-    [1,2,8],
-    [1,2,4,5],
-    [2,5,6],
-    [3,6,7],
-    [7,9]]
-        s = set([x for sub_arry in he_nodes for x in sub_arry])
-        H.add_nodes_from(s)
-        for he in he_nodes:
-            H.add_edge(he)
-    else:
-        for he_nodes in df_nodes:
-            H.add_edge(he_nodes)
-
-        #remove node 0 if it exists
-        if 0 in H.nodes:
-            H.remove_node(0)
-
-
-# %%
-if dataset == "walmart":
-    if use_toy:
-        xgi.draw(H,node_labels=True, node_size=15)  # visualize the hypergraph
-    else:
-        xgi.draw(H)  # visualize the hypergraph
-    e = xgi.convert.to_incidence_matrix(H)  # get incidence matrix
-    e.toarray()  # convert to dense array
+# if dataset == "walmart":
+#     if use_toy:
+#         xgi.draw(H,node_labels=True, node_size=15)  # visualize the hypergraph
+#     else:
+#         xgi.draw(H)  # visualize the hypergraph
+#     e = xgi.convert.to_incidence_matrix(H)  # get incidence matrix
+#     e.toarray()  # convert to dense array
 
 #%%
 def hypergraph_random_walk(incidence_matrix):
@@ -233,19 +271,16 @@ class Network(torch.nn.Module):
 
 
 # %%
-x_0s = torch.tensor(x_0s)
-
-numClasses = np.max(y) + 1
-oneHotY = np.zeros((len(y), numClasses))
-oneHotY[np.arange(len(y)), y] = 1
+if x_0s is not torch.Tensor:
+    x_0s = torch.tensor(x_0s)
 
 # %%
 # Hyperparameters
 
-use_arnoldis = True
+use_arnoldis = False
 eigenvectors = 10
 
-use_random_walk_pe = True
+use_random_walk_pe = False
 anchorNodes = 5
 numWalks = 1
 
@@ -268,9 +303,9 @@ if use_random_walk_pe:
 # %% 
 
 x, incidence_1, y = (
-    torch.tensor(x_0s).float().to(device),
-    torch.tensor(incidence_1).to_sparse().float().to(device),
-    torch.tensor(oneHotY).to(device),
+    x_0s.float().to(device),
+    incidence_1.to_sparse().float().to(device),
+    y.to(device),
 )
 
 
@@ -357,7 +392,7 @@ for epoch_i in range(1, num_epochs + 1):
 model.eval()
 y_hat = y_hat = model(x, incidence_1).argmax(dim=1).numpy()
 cm = sklearn.metrics.confusion_matrix(y.argmax(dim=1),y_hat)
-confusion_matrixes.append(cm)
+# confusion_matrixes.append(cm)
 
 # %%
 from matplotlib import pyplot as plt
