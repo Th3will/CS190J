@@ -47,14 +47,14 @@ dataset = "walmart"
 
 # Parsing the walmart set:
 if dataset == "walmart":
-    df = pd.read_csv('data/walmart/walmart-hyperedges.tsv', sep='\t')
-    df_hyper_edges = df["nodes"].to_list()
+    df_he = pd.read_csv('data/walmart/walmart-hyperedges.tsv', sep='\t')
+    df_hyper_edges = df_he["nodes"].to_list()
     df_hyper_edges = list(map(lambda x: list(map(int, x.split(','))), df_hyper_edges))
 
-    df_day_of_week_features = df["dayofweek"].to_list()
+    df_day_of_week_features = df_he["dayofweek"].to_list()
     df_day_of_week_features = list(map(lambda x: [int(x)], df_day_of_week_features))
 
-    df_triptype_labels = df["triptype"].to_list()
+    df_triptype_labels = df_he["triptype"].to_list()
     df_triptype_labels = list(map(int, df_triptype_labels))
 
     # y = torch.Tensor(df_triptype_labels)
@@ -67,9 +67,11 @@ if dataset == "walmart":
     y = oneHotY
     y = torch.Tensor(y)
 
-    df = pd.read_csv('data/walmart/walmart-nodes.tsv', sep='\t')
-    df_categories = np.array(df["category"], dtype=np.int64)
-    df_nodes = df["node_id"].to_list()
+    df_n = pd.read_csv('data/walmart/walmart-nodes.tsv', sep='\t')
+    df_categories = np.array(df_n["category"], dtype=np.int64)
+    df_nodes = df_n["node_id"].to_list()
+
+    df = df_he
 
     # Nodes are not ordered by default in xgi so need to make sure 
     H = xgi.Hypergraph()
@@ -217,7 +219,7 @@ class Network(torch.nn.Module):
     out_channels : int
         Dimension of the output features.
     task_level : str
-        Level of the task. Either "graph" or "node".
+        Level of the task. Either "graph", "node", or "edge.
     """
 
     def __init__(
@@ -233,13 +235,20 @@ class Network(torch.nn.Module):
         # Readout
         self.linear = torch.nn.Linear(hidden_channels, out_channels)
         self.out_pool = task_level == "graph"
+        self.edge_pool = task_level == "edge"
 
     def forward(self, x_0, incidence_1):
         # Base model
         x_0, x_1 = self.base_model(x_0, incidence_1)
 
         # Pool over all nodes in the hypergraph
-        x = torch.max(x_0, dim=0)[0] if self.out_pool is True else x_0
+        x = None
+        if self.out_pool:
+            x = torch.max(x_0, dim=0)[0] 
+        elif self.edge_pool:
+            x = x_1
+        else:
+            x = x_0
 
         return self.linear(x)
 
@@ -255,6 +264,7 @@ numWalks = 1
 
 # %%
 ## add encodings
+print("Adding encodings...")
 
 x = x_0s
 if use_arnoldis:
@@ -272,7 +282,7 @@ if use_random_walk_pe:
 # %% 
 
 x, incidence_1, y = (
-    x_0s.float().to(device),
+    x_0s.to_dense().float().to(device),
     incidence_1.to_sparse().float().to(device),
     y.to(device),
 )
@@ -288,10 +298,14 @@ mlp_num_layers = 2
 
 # Readout hyperparameters
 out_channels = y.shape[1]
-task_level = "graph" if out_channels == 1 else "node"
+
+# TODO: BEWAREEEEEE
+task_level = "edge" #"graph" if out_channels == 1 else "node"
 
 
 # %%
+
+print("Creating model")
 
 model = Network(
     in_channels=in_channels,
@@ -314,7 +328,7 @@ def acc_fn(y, y_hat):
     return (y.argmax(dim=1) == y_hat.argmax(dim=1)).float().mean()
 
 
-
+# %%
 # create masking for training
 TRAIN_TEST_SPLIT_RATIO = 0.8
 trainSize = int(len(df)*TRAIN_TEST_SPLIT_RATIO)
@@ -327,13 +341,14 @@ num_epochs = 20
 epoch_loss = []
 train_accuracy = []
 test_accuracy = []
+print("Starting training")
 for epoch_i in range(1, num_epochs + 1):
     model.train()
 
     opt.zero_grad()
 
     # Extract edge_index from sparse incidence matrix
-    _, y_hat = model(x, incidence_1)
+    y_hat = model(x, incidence_1)
     loss = loss_fn(y_hat[train_mask], y[train_mask])
 
     loss.backward()
@@ -343,10 +358,10 @@ for epoch_i in range(1, num_epochs + 1):
 
     if epoch_i % test_interval == 0:
         model.eval()
-        _, y_hat = model(x, incidence_1)
+        y_hat = model(x, incidence_1)
 
-        loss = loss_fn(y_hat[train_mask], y[train_mask])
         print(f"Epoch: {epoch_i} ")
+        loss = loss_fn(y_hat[train_mask], y[train_mask])
         print(
             f"Train_loss: {np.mean(epoch_loss):.4f}, acc: {acc_fn(y_hat[train_mask], y[train_mask]):.4f}",
             flush=True,
@@ -359,7 +374,7 @@ for epoch_i in range(1, num_epochs + 1):
             flush=True,
         )
 model.eval()
-_, y_hat = model(x, incidence_1)
+y_hat = model(x, incidence_1)
 y_hat = y_hat.argmax(dim=1).numpy()
 cm = sklearn.metrics.confusion_matrix(y.argmax(dim=1),y_hat)
 # confusion_matrixes.append(cm)
