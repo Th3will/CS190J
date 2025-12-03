@@ -1,17 +1,3 @@
-# %% [markdown]
-# * Implement the Positional Encoding
-#     1. Perform a random walk on the hypergraph
-# 	    *  WTF does the random walk look like
-# 		* How do I choose the anchor nodes?
-# 		* What is the number of walks I should do?
-# 			* Probably the diameter of the largest component on the graph
-#     2. append a set onto the data
-#     3. Develop a masking and train a transformer (look at overriding pytorch geometrics data) on the entire graph (only care about the loss of the masked portion)
-#     4. Do ablation testing
-# * Implement the Hypergraph Transformer
-#     1. 
-#     
-
 # %%
 # imports
 import torch
@@ -33,14 +19,19 @@ import pandas as pd
 import random
 import numpy as np
 from scipy.sparse import coo_array
+from scipy.sparse import csr_array
 import scipy
 import sklearn.metrics
 
-# %%
-device = 'cpu'
+random.seed(42)
+np.random.seed(42)
+torch.manual_seed(42)
+torch.use_deterministic_algorithms(True)
 
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 # %%
 # Helpers
+
 def coo2Sparse(coo) -> torch.Tensor:
     if coo is not scipy.sparse.coo_array:
         coo = coo.tocoo()
@@ -51,12 +42,6 @@ def coo2Sparse(coo) -> torch.Tensor:
     i = torch.LongTensor(indices)
     v = torch.FloatTensor(values)
     return torch.sparse_coo_tensor(i, v, torch.Size(shape))
-
-# %%
-random.seed(42)
-np.random.seed(42)
-torch.manual_seed(42)
-torch.use_deterministic_algorithms(True)
 
 dataset = "walmart"
 
@@ -71,7 +56,16 @@ if dataset == "walmart":
 
     df_triptype_labels = df["triptype"].to_list()
     df_triptype_labels = list(map(int, df_triptype_labels))
-    y = torch.Tensor(df_triptype_labels)
+
+    # y = torch.Tensor(df_triptype_labels)
+    y = [i - 1 for i in df_triptype_labels]
+
+    numClasses = np.max(y) + 1
+    oneHotY = np.zeros((len(y), numClasses))
+    oneHotY[np.arange(len(y)), y] = 1
+
+    y = oneHotY
+    y = torch.Tensor(y)
 
     df = pd.read_csv('data/walmart/walmart-nodes.tsv', sep='\t')
     df_categories = np.array(df["category"], dtype=np.int64)
@@ -82,12 +76,18 @@ if dataset == "walmart":
     H.add_nodes_from(df_nodes)
     for he in df_hyper_edges:
         H.add_edge(he)
+        
+    # H.cleanup(multiedges=True, in_place=True)
     incidence_1 = coo2Sparse(xgi.convert.to_incidence_matrix(H, sparse=True))
 
     numClasses = np.argmax(df_categories) - 1
     x_0s = torch.zeros((len(df_categories), numClasses))
     x_0s[torch.arange(len(df_categories)), df_categories - 1] = 1
+    x_0s = x_0s.to_sparse_coo()
+    # x_0s = torch.zeros((H.nodes, numClasses))
+    # x_0s[torch.arange(len(df_categories)), df_categories - 1] = 1
     
+
 
 elif dataset == "zoo":
     df = pd.read_csv('data/zoo/zoo.data')
@@ -111,70 +111,34 @@ elif dataset == "zoo":
     df_legs = pd.DataFrame({"%d legs" % i : df["legs"] == i for i in leg_values}, index=df.index)
     
     incidence_1 = np.concatenate([df_bool_matrix, df_neg_bool_matrix, df_legs], axis=1)
+    H = xgi.Hypergraph(incidence_1)
+    H.cleanup(isolates=True, in_place=True)
     x_0s = np.zeros(shape=(num_nodes,0))
+    
     # pos_hypergraph = xgi.convert.from_incidence_matrix(df_bool_matrix)
 
     incidence_1 = torch.from_numpy(incidence_1).to_sparse()
     # calculate incidence matrix
     # incidence_1 = coo_array(np.array(df_nodes))
 
-# # TODO: REMOVE — using a subset of edges for now
-subset = False
 
-if subset:
-    df = df[:4]
-
-
-# # %%
-# if dataset == "walmart":
-#     # Create a Hypergraph from Walmart Data, using xgi
-#     H = xgi.Hypergraph()
-#     # print("num nodes:", num_nodes)
-#     # H.add_nodes_from(range(num_nodes))
-#     use_toy = False
-#     if use_toy:
-#         he_nodes = [[1,3],
-#     [1,2,8],
-#     [1,2,4,5],
-#     [2,5,6],
-#     [3,6,7],
-#     [7,9]]
-#         s = set([x for sub_arry in he_nodes for x in sub_arry])
-#         H.add_nodes_from(s)
-#         for he in he_nodes:
-#             H.add_edge(he)
-#     else:
-#         for he_nodes in df_nodes:
-#             H.add_edge(he_nodes)
-
-#         #remove node 0 if it exists
-#         if 0 in H.nodes:
-#             H.remove_node(0)
-
-
-# %%
-# if dataset == "walmart":
-#     if use_toy:
-#         xgi.draw(H,node_labels=True, node_size=15)  # visualize the hypergraph
-#     else:
-#         xgi.draw(H)  # visualize the hypergraph
-#     e = xgi.convert.to_incidence_matrix(H)  # get incidence matrix
-#     e.toarray()  # convert to dense array
 
 #%%
 def hypergraph_random_walk(incidence_matrix):
     C = incidence_matrix.T @ incidence_matrix # hyper-edge "adjacency" matrix
     # C_hat is defined by just the diagonal of C
-    C_hat = C * np.eye(C.shape[0])
+    C_hat = C * scipy.sparse.eye_array(C.shape[0])
 
     adj_mat = incidence_matrix @ incidence_matrix.T
     transition_mat =  incidence_matrix @ C_hat @ incidence_matrix.T - adj_mat
     # zero diagonals
-    np.fill_diagonal(transition_mat, 0)
-    return transition_mat/transition_mat.sum(axis=1)
+    transition_mat.setdiag(0)
+    zero_to_one = lambda i : 1 if i == 0 else i
+    return transition_mat/np.array([zero_to_one(i) for i in transition_mat.sum(axis=1)])
 
-def anchor_positional_encoding(incidence_matrix, anchor_nodes, iterations):
-    transition_mat = hypergraph_random_walk(incidence_matrix)
+def anchor_positional_encoding(hypergraph: xgi.Hypergraph, anchor_nodes, iterations):
+    incidence_matrix = xgi.convert.to_incidence_matrix(hypergraph)
+    transition_mat = coo2Sparse(hypergraph_random_walk(incidence_matrix))
     
     ary = []
     if len(anchor_nodes) == 0:
@@ -182,11 +146,21 @@ def anchor_positional_encoding(incidence_matrix, anchor_nodes, iterations):
         return torch.zeros(incidence_matrix.shape[0], 0)
     
     # initialize anchor node matrix which is a one-hot encoding of the anchor nodes
-    for node in anchor_nodes:
-        temp = np.zeros(transition_mat.shape[0])
-        temp[node] = 1
-        ary.append(temp)
-    anchor_node = np.array(ary).T  # shape: num_nodes x num_anchors
+    
+    # for node in anchor_nodes:
+    #     temp = np.zeros(transition_mat.shape[0])
+    #     temp[node] = 1
+    #     ary.append(temp)
+    # anchor_node = np.array(ary).T  # shape: num_nodes x num_anchors
+
+    indicies = torch.stack([torch.as_tensor(anchor_nodes), torch.arange(len(anchor_nodes))])
+    values = torch.ones(len(anchor_nodes))
+
+    anchor_node = torch.sparse_coo_tensor(
+        indicies, 
+        values, 
+        size=(transition_mat.shape[0], len(anchor_nodes))
+    )
     
     # perform random walk for specified iterations
     for _ in range(iterations):
@@ -208,7 +182,7 @@ def arnoldi_encoding(hypergraph : xgi.Hypergraph, k : int, largestOnly = False):
     DETERMINISM_MATRIX = np.random.rand(laplacian.shape[0])
 
     kSmallest = np.zeros((hypergraph.num_nodes,0))
-    if largestOnly:
+    if not largestOnly:
         k = k//2
         kSmallest = np.real(scipy.sparse.linalg.eigsh(laplacian, k=k, which='SM', v0=DETERMINISM_MATRIX)[1])
     
@@ -269,18 +243,13 @@ class Network(torch.nn.Module):
 
         return self.linear(x)
 
-
-# %%
-if x_0s is not torch.Tensor:
-    x_0s = torch.tensor(x_0s)
-
 # %%
 # Hyperparameters
 
 use_arnoldis = False
-eigenvectors = 10
+eigenvectors = 2
 
-use_random_walk_pe = False
+use_random_walk_pe = True
 anchorNodes = 5
 numWalks = 1
 
@@ -289,16 +258,16 @@ numWalks = 1
 
 x = x_0s
 if use_arnoldis:
-    arnoldis = arnoldi_encoding(hypergraph=xgi.Hypergraph(incidence_1), k=eigenvectors)
-    x_0s = np.concatenate([x_0s, arnoldis], axis=1)
+    arnoldis = arnoldi_encoding(hypergraph=H, k=eigenvectors)
+    x_0s = torch.cat([x_0s, arnoldis], axis=1)
 
 if use_random_walk_pe:
     rw_pe = anchor_positional_encoding(
-        incidence_matrix=incidence_1,
+        hypergraph=H,
         anchor_nodes=random.sample(range(incidence_1.shape[0]), k=anchorNodes),
         iterations=numWalks
-    ).numpy()
-    x_0s = np.concatenate([x_0s, rw_pe], axis=1)
+    )
+    x_0s = torch.cat([x_0s, rw_pe], dim=1)
 
 # %% 
 
@@ -354,7 +323,7 @@ random.shuffle(train_mask)
 test_mask = [not x for x in train_mask]
 
 test_interval = 1
-num_epochs = 1000
+num_epochs = 20
 epoch_loss = []
 train_accuracy = []
 test_accuracy = []
@@ -364,7 +333,7 @@ for epoch_i in range(1, num_epochs + 1):
     opt.zero_grad()
 
     # Extract edge_index from sparse incidence matrix
-    y_hat = model(x, incidence_1)
+    _, y_hat = model(x, incidence_1)
     loss = loss_fn(y_hat[train_mask], y[train_mask])
 
     loss.backward()
@@ -374,7 +343,7 @@ for epoch_i in range(1, num_epochs + 1):
 
     if epoch_i % test_interval == 0:
         model.eval()
-        y_hat = model(x, incidence_1)
+        _, y_hat = model(x, incidence_1)
 
         loss = loss_fn(y_hat[train_mask], y[train_mask])
         print(f"Epoch: {epoch_i} ")
@@ -390,7 +359,8 @@ for epoch_i in range(1, num_epochs + 1):
             flush=True,
         )
 model.eval()
-y_hat = y_hat = model(x, incidence_1).argmax(dim=1).numpy()
+_, y_hat = model(x, incidence_1)
+y_hat = y_hat.argmax(dim=1).numpy()
 cm = sklearn.metrics.confusion_matrix(y.argmax(dim=1),y_hat)
 # confusion_matrixes.append(cm)
 
