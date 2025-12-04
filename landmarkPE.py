@@ -24,6 +24,12 @@ from scipy.sparse import csr_array
 import scipy
 import sklearn.metrics
 
+from sklearn.utils.extmath import randomized_svd
+
+import sys
+
+import time
+
 random.seed(42)
 np.random.seed(42)
 torch.manual_seed(42)
@@ -78,16 +84,26 @@ if dataset == "walmart":
 
     # Nodes are not ordered by default in xgi so need to make sure 
     H = xgi.Hypergraph()
+    
     H.add_nodes_from(df_nodes)
     for he in df_hyper_edges:
         H.add_edge(he)
-        
-    # H.cleanup(multiedges=True, in_place=True)
+    
+    isolates = H.nodes.isolates()
+    H.remove_nodes_from(isolates)
+
+    # Map original node IDs to their categories
+    node_cat_map = dict(zip(df_nodes, df_categories))
+
+    # Re-build df_categories to match the current H.nodes order exactly
+    # This prevents dimension mismatch in the torch tensor creation below
+    df_categories = np.array([node_cat_map[n] for n in H.nodes])
+
     incidence_1 = coo2Sparse(xgi.convert.to_incidence_matrix(H, sparse=True))
 
     numClasses = np.max(df_categories)
-    x_0s = torch.zeros((len(df_categories), numClasses))
-    x_0s[torch.arange(len(df_categories)), df_categories - 1] = 1
+    x_0s = torch.zeros(H.num_nodes, numClasses)
+    x_0s[torch.arange(H.num_nodes), torch.tensor(df_categories - 1)] = 1
     x_0s = x_0s.to_sparse_coo()
     # x_0s = torch.zeros((H.nodes, numClasses))
     # x_0s[torch.arange(len(df_categories)), df_categories - 1] = 1
@@ -174,7 +190,7 @@ def anchor_positional_encoding(hypergraph: xgi.Hypergraph, anchor_nodes, iterati
     return torch.tensor(anchor_node)
 
 #%%
-def arnoldi_encoding(hypergraph : xgi.Hypergraph, k : int, largestOnly = False):
+def arnoldi_encoding(hypergraph : xgi.Hypergraph, k : int, smallestOnly = True):
     if k == 0: 
         return np.zeros((hypergraph.num_nodes,0))
     
@@ -184,17 +200,23 @@ def arnoldi_encoding(hypergraph : xgi.Hypergraph, k : int, largestOnly = False):
         index=False
     )
 
-    DETERMINISM_MATRIX = np.random.rand(laplacian.shape[0])
-
-    kSmallest = np.zeros((hypergraph.num_nodes,0))
-    if not largestOnly:
+    n = laplacian.shape[0]
+    
+    DETERMINISM_EIGS_L = np.random.rand(n, k)
+    DETERMINISM_EIGS_S = np.random.rand(n, k)
+    
+    # 2. Run LOBPCG
+    # largest=False targets the smallest eigenvalues
+    # tol=1e-2 is "loose" but sufficient for clustering/embeddings
+    kLargest = torch.from_numpy(np.zeros((hypergraph.num_nodes,0)))
+    if not smallestOnly:
         k = k//2
-        kSmallest = np.real(scipy.sparse.linalg.eigsh(laplacian, k=k, which='SM', v0=DETERMINISM_MATRIX)[1])
-    
-    kLargest = np.real(scipy.sparse.linalg.eigsh(laplacian, k=k, which='LM', v0=DETERMINISM_MATRIX)[1])
-    
+        kLargest = torch.from_numpy(np.real(scipy.sparse.linalg.lobpcg(laplacian, DETERMINISM_EIGS_L, largest=True, tol=1e-2)[1]))
+        
+    kSmallest = torch.from_numpy(np.real(scipy.sparse.linalg.lobpcg(laplacian, DETERMINISM_EIGS_S, largest=False, tol=1e-2)[1]))
 
-    return np.concatenate((kLargest, kSmallest), axis=1)
+
+    return torch.cat((kLargest, kSmallest), axis=1).to_sparse()
 
 # %% Actual ML stuff
 # Where do we go from here?
@@ -258,12 +280,28 @@ class Network(torch.nn.Module):
 # %%
 # Hyperparameters
 
-use_arnoldis = False
-eigenvectors = 2
+use_arnoldis = True
+eigenvectors = 4
 
-use_random_walk_pe = True
-anchorNodes = 1000
-numWalks = 3
+use_random_walk_pe = False
+anchorNodes = 0
+numWalks = 0
+
+if len(sys.argv) > 1:
+    i = 1
+    while i < len(sys.argv):
+        if sys.argv[i].startswith("-a"):
+            use_arnoldis = True
+            i += 1
+            eigenvectors = int(sys.argv[i])
+            i += 1
+        elif sys.argv[i].startswith("-w"):
+            use_random_walk_pe = True
+            i += 1
+            anchorNodes = int(sys.argv[i])
+            i += 1
+            numWalks = int(sys.argv[i])
+        i += 1
 
 # %%
 ## add encodings
@@ -345,6 +383,7 @@ epoch_loss = []
 train_accuracy = []
 test_accuracy = []
 print("Starting training")
+begin = time.perf_counter()
 for epoch_i in range(1, num_epochs + 1):
     model.train()
 
@@ -361,10 +400,11 @@ for epoch_i in range(1, num_epochs + 1):
 
     if epoch_i % test_interval == 0:
         model.eval()
+
         y_hat = model(x, incidence_1)
+        loss = loss_fn(y_hat[train_mask], y[train_mask])
 
         print(f"Epoch: {epoch_i} ")
-        loss = loss_fn(y_hat[train_mask], y[train_mask])
         print(
             f"Train_loss: {np.mean(epoch_loss):.4f}, acc: {acc_fn(y_hat[train_mask], y[train_mask]):.4f}",
             flush=True,
@@ -376,6 +416,8 @@ for epoch_i in range(1, num_epochs + 1):
             f"Test_loss: {loss:.4f}, Test_acc: {acc_fn(y_hat[test_mask], y[test_mask]):.4f}",
             flush=True,
         )
+
+print(f"Total took {time.perf_counter() - begin} seconds.")
 model.eval()
 y_hat = model(x, incidence_1)
 y_hat = y_hat.argmax(dim=1).cpu().numpy()
@@ -384,7 +426,7 @@ cm = sklearn.metrics.confusion_matrix(y.argmax(dim=1).cpu(),y_hat)
 
 # %%
 from matplotlib import pyplot as plt
-plt.title("Accuracy over Epochs\nRW (walk size 1, 10 anchors) PEs")
+plt.title("Accuracy over Epochs\nRW (walk size %d, %d anchors) PEs" % (numWalks, anchorNodes))
 
 plt.xlabel("Epoch")
 plt.ylabel("Accuracy")
