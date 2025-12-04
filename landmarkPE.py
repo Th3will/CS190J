@@ -55,7 +55,7 @@ def coo2Sparse(coo) -> torch.Tensor:
     v = torch.FloatTensor(values)
     return torch.sparse_coo_tensor(i, v, torch.Size(shape))
 
-dataset = "cora"
+dataset = "zoo"
 
 if dataset == "cora":
     # from AllSet loading
@@ -66,7 +66,7 @@ if dataset == "cora":
         # first load node features:
         with open(coraPath + 'features.pickle', 'rb') as f:
             features = pickle.load(f)
-            features = features.todense()
+            features = features.todense()[:, :0]
 
         with open(coraPath + 'labels.pickle', 'rb') as f:
             labels = pickle.load(f)
@@ -168,13 +168,13 @@ if dataset == "walmart":
 
 elif dataset == "zoo":
     df = pd.read_csv('data/zoo/zoo.data')
-    y = [i - 1 for i in df["type"].to_list()]
+    y_indices = torch.LongTensor([i - 1 for i in df["type"].to_list()])
 
-    numClasses = np.max(y) + 1
-    oneHotY = np.zeros((len(y), numClasses))
-    oneHotY[np.arange(len(y)), y] = 1
+    # numClasses = np.max(y) + 1
+    # oneHotY = np.zeros((len(y), numClasses))
+    # oneHotY[np.arange(len(y)), y] = 1
 
-    y = oneHotY
+    # y = oneHotY
 
     num_nodes = df.shape[0]
     ## remove the animal names column
@@ -190,7 +190,7 @@ elif dataset == "zoo":
     incidence_1 = np.concatenate([df_bool_matrix, df_neg_bool_matrix, df_legs], axis=1)
     H = xgi.Hypergraph(incidence_1)
     H.cleanup(isolates=True, in_place=True)
-    x_0s = np.zeros(shape=(num_nodes,0))
+    x_0s = torch.zeros(size=(num_nodes,0))
     
     # pos_hypergraph = xgi.convert.from_incidence_matrix(df_bool_matrix)
 
@@ -387,6 +387,123 @@ class STransformer2(nn.Module):
         # x = x / hyperedge_degrees 
 
         return self.fc_out(x)
+
+class GraphTransformer(nn.Module):
+    def __init__(self, in_dim, d_model, nhead, num_layers, dim_feedforward=512, dropout=0.1):
+        """
+        Args:
+            in_dim: Original feature dimension (e.g., 1433).
+            d_model: Internal dimension for the transformer (must be divisible by nhead).
+            nhead: Number of attention heads.
+            num_layers: Number of transformer encoder layers.
+        """
+        super().__init__()
+        
+        # 1. Projection: Map irregular input dims (like 1433) to d_model
+        self.project_in = nn.Linear(in_dim, d_model)
+        
+        # 2. Transformer Encoder
+        # batch_first=True expects input: (Batch_Size, Seq_Len/Nodes, Features)
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=d_model, 
+            nhead=nhead, 
+            dim_feedforward=dim_feedforward, 
+            dropout=dropout, 
+            batch_first=True
+        )
+        self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        
+        # 3. Output Projection (Optional: project back to class logits or keep as embeddings)
+        # self.project_out = nn.Linear(d_model, num_classes) # Uncomment if needed
+
+    def forward(self, x, mask=None, src_key_padding_mask=None):
+        """
+        x: Input tensor of shape (Batch, Nodes, in_dim) or (Nodes, in_dim)
+        mask: Optional mask for self-attention (e.g., adjacency constraints)
+        src_key_padding_mask: Optional mask for ignoring padding nodes in batch
+        """
+        # Ensure batch dimension exists
+        if x.dim() == 2:
+            x = x.unsqueeze(0) # (1, Nodes, Features)
+
+        # Project features
+        x = self.project_in(x)
+        
+        # Apply Transformer
+        # Output shape: (Batch, Nodes, d_model)
+        out = self.transformer_encoder(x, mask=mask, src_key_padding_mask=src_key_padding_mask)
+        
+        return out
+
+class ConciseTransformer(nn.Module):
+    def __init__(
+        self, 
+        d_model: int, 
+        nhead: int, 
+        num_encoder_layers: int, 
+        num_decoder_layers: int, 
+        output_dim: int, 
+        dim_feedforward: int = 2048, 
+        dropout: float = 0.1
+    ):
+        """
+        Args:
+            d_model: The number of expected features in the encoder/decoder inputs (embedding size).
+            nhead: The number of heads in the multiheadattention models.
+            num_encoder_layers: The number of sub-encoder-layers in the encoder.
+            num_decoder_layers: The number of sub-decoder-layers in the decoder.
+            output_dim: The dimension of the final output (e.g., vocab size).
+        """
+        super().__init__()
+        
+        # Native PyTorch Transformer. 
+        # Note: This module does NOT add positional encodings, satisfying your constraint.
+        self.transformer = nn.Transformer(
+            d_model=d_model,
+            nhead=nhead,
+            num_encoder_layers=num_encoder_layers,
+            num_decoder_layers=num_decoder_layers,
+            dim_feedforward=dim_feedforward,
+            dropout=dropout,
+            batch_first=True # Expects (batch, seq_len, features)
+        )
+        
+        # Final projection layer to map back to vocabulary/output size
+        self.fc_out = nn.Linear(d_model, output_dim)
+
+    def generate_square_subsequent_mask(self, sz: int) -> torch.Tensor:
+        """Generates an upper-triangular matrix of -inf, with zeros on diag."""
+        return torch.triu(torch.full((sz, sz), float('-inf')), diagonal=1)
+
+    def forward(
+        self, 
+        src: torch.Tensor, 
+        tgt: torch.Tensor, 
+        src_mask: torch.Tensor = None, 
+        tgt_mask: torch.Tensor = None,
+        src_padding_mask: torch.Tensor = None, 
+        tgt_padding_mask: torch.Tensor = None
+    ):
+        """
+        Args:
+            src: Source sequence (Batch, Seq_Len, d_model) - Includes Positional Encoding
+            tgt: Target sequence (Batch, Seq_Len, d_model) - Includes Positional Encoding
+            tgt_mask: Causal mask for decoder (usually required)
+            padding_masks: Boolean masks where True indicates padding to be ignored.
+        """
+        
+        # Pass through the main Transformer (Encoder + Decoder)
+        out = self.transformer(
+            src=src,
+            tgt=tgt,
+            src_mask=src_mask,
+            tgt_mask=tgt_mask,
+            src_key_padding_mask=src_padding_mask,
+            tgt_key_padding_mask=tgt_padding_mask
+        )
+        
+        # Project to output dimension
+        return self.fc_out(out)
     
 class MLP(nn.Module):
     def __init__(self, in_channels, hidden_channels, out_channels, n_layers):
@@ -516,6 +633,7 @@ if use_random_walk_pe:
     )
     x_0s = torch.cat([x_0s, rw_pe.to_dense()], dim=1)
 
+# x_0s = torch.reshape(x_0s, (1, -1))
 # %% 
 
 x, incidence_1, y = (
@@ -527,7 +645,7 @@ x, incidence_1, y = (
 
 # Base model hyperparameters
 in_channels = x.shape[1]
-hidden_channels = 32
+hidden_channels = 128
 
 heads = 4
 n_layers = 1
@@ -537,21 +655,34 @@ mlp_num_layers = 2
 task_level = "node" #"graph" if out_channels == 1 else "node"
 
 # out_channels = numClasses # WALMART
-out_channels = max(y_indices) + 1
+out_channels = (max(y_indices) + 1) # * H.num_nodes
 
-
+print(x[0])
+print(x[1])
 # %%
 
 print("Creating model")
-
-model = STransformer2(
-    in_channels=in_channels,
-    hidden_channels=hidden_channels,
-    out_channels=out_channels,
-    n_layers=n_layers
-    # mlp_num_layers=mlp_num_layers,
-    # task_level=task_level,
-).to(device)
+model = GraphTransformer(
+    in_dim=in_channels,
+    d_model=128,
+    nhead=4,
+    num_layers=2
+)
+# model = ConciseTransformer(
+#     d_model=in_channels,
+#     nhead=1,
+#     num_encoder_layers=2,
+#     num_decoder_layers=0,
+#     output_dim=out_channels
+# )
+# model = STransformer2(
+#     in_channels=in_channels,
+#     hidden_channels=hidden_channels,
+#     out_channels=out_channels,
+#     n_layers=n_layers
+#     # mlp_num_layers=mlp_num_layers,
+#     # task_level=task_level,
+# ).to(device)
 
 # Optimizer and loss
 opt = torch.optim.Adam(model.parameters(), lr=0.001)
@@ -567,7 +698,7 @@ def acc_fn(y_hat, y):
 
 # %%
 # create masking for training
-TRAIN_TEST_SPLIT_RATIO = 0.95
+TRAIN_TEST_SPLIT_RATIO = 0.8
 # outsize = len(df) # WALMART
 outsize = H.num_nodes
 trainSize = int(outsize*TRAIN_TEST_SPLIT_RATIO)
@@ -587,37 +718,37 @@ for epoch_i in range(1, num_epochs + 1):
     opt.zero_grad()
 
     # Extract edge_index from sparse incidence matrix
-    y_hat = model(x, incidence_1)
-    loss = loss_fn(y_hat[train_mask], y[train_mask])
+    y_hat = model(x)
+    loss = loss_fn(y_hat[0][train_mask], y[train_mask])
 
     loss.backward()
     opt.step()
     epoch_loss.append(loss.item())
-    train_accuracy.append(acc_fn(y_hat[train_mask], y[train_mask]).item())
+    train_accuracy.append(acc_fn(y_hat[0][train_mask], y[train_mask]).item())
 
     if epoch_i % test_interval == 0:
         model.eval()
 
-        y_hat = model(x, incidence_1)
-        loss = loss_fn(y_hat[train_mask], y[train_mask])
+        y_hat = model(x)
+        loss = loss_fn(y_hat[0][train_mask], y[train_mask])
 
         print(f"Epoch: {epoch_i} ")
         print(
-            f"Train_loss: {np.mean(epoch_loss):.4f}, acc: {acc_fn(y_hat[train_mask], y[train_mask]):.4f}",
+            f"Train_loss: {np.mean(epoch_loss):.4f}, acc: {acc_fn(y_hat[0][train_mask], y[train_mask]):.4f}",
             flush=True,
         )
-        test_accuracy.append(acc_fn(y_hat[test_mask], y[test_mask]))
+        test_accuracy.append(acc_fn(y_hat[0][test_mask], y[test_mask]))
 
-        loss = loss_fn(y_hat[test_mask], y[test_mask])
+        loss = loss_fn(y_hat[0][test_mask], y[test_mask])
         print(
-            f"Test_loss: {loss:.4f}, Test_acc: {acc_fn(y_hat[test_mask], y[test_mask]):.4f}",
+            f"Test_loss: {loss:.4f}, Test_acc: {acc_fn(y_hat[0][test_mask], y[test_mask]):.4f}",
             flush=True,
         )
 
 print(f"Total took {time.perf_counter() - begin} seconds.")
 model.eval()
-y_hat = model(x, incidence_1)
-y_hat = y_hat.argmax(dim=1).cpu().numpy()
+y_hat = model(x)
+y_hat = y_hat[0].argmax(dim=1).cpu().numpy()
 cm = sklearn.metrics.confusion_matrix(y.cpu(),y_hat)
 # confusion_matrixes.append(cm)
 
