@@ -1,5 +1,6 @@
 # %%
 # imports
+import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -29,6 +30,8 @@ torch.manual_seed(42)
 torch.use_deterministic_algorithms(True)
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+if torch.cuda.is_available():
+    os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 # %%
 # Helpers
 
@@ -82,7 +85,7 @@ if dataset == "walmart":
     # H.cleanup(multiedges=True, in_place=True)
     incidence_1 = coo2Sparse(xgi.convert.to_incidence_matrix(H, sparse=True))
 
-    numClasses = np.argmax(df_categories) - 1
+    numClasses = np.max(df_categories)
     x_0s = torch.zeros((len(df_categories), numClasses))
     x_0s[torch.arange(len(df_categories)), df_categories - 1] = 1
     x_0s = x_0s.to_sparse_coo()
@@ -259,8 +262,8 @@ use_arnoldis = False
 eigenvectors = 2
 
 use_random_walk_pe = True
-anchorNodes = 5
-numWalks = 1
+anchorNodes = 1000
+numWalks = 3
 
 # %%
 ## add encodings
@@ -337,7 +340,7 @@ random.shuffle(train_mask)
 test_mask = [not x for x in train_mask]
 
 test_interval = 1
-num_epochs = 20
+num_epochs = 1000
 epoch_loss = []
 train_accuracy = []
 test_accuracy = []
@@ -375,8 +378,8 @@ for epoch_i in range(1, num_epochs + 1):
         )
 model.eval()
 y_hat = model(x, incidence_1)
-y_hat = y_hat.argmax(dim=1).numpy()
-cm = sklearn.metrics.confusion_matrix(y.argmax(dim=1),y_hat)
+y_hat = y_hat.argmax(dim=1).cpu().numpy()
+cm = sklearn.metrics.confusion_matrix(y.argmax(dim=1).cpu(),y_hat)
 # confusion_matrixes.append(cm)
 
 # %%
@@ -386,8 +389,8 @@ plt.title("Accuracy over Epochs\nRW (walk size 1, 10 anchors) PEs")
 plt.xlabel("Epoch")
 plt.ylabel("Accuracy")
 plt.ylim((0, 1))
-plt.plot(np.arange(num_epochs, step=test_interval), test_accuracy, label="Test")
-plt.plot(train_accuracy, label="Train")
+plt.plot(np.arange(num_epochs, step=test_interval), [x.cpu() for x in test_accuracy], label="Test")
+plt.plot([x.cpu() for x in train_accuracy], label="Train")
 plt.legend()
 
 disp = sklearn.metrics.ConfusionMatrixDisplay(confusion_matrix=cm)
@@ -403,7 +406,7 @@ print('''{
     "walks" : %d,     
     "testAcc" : ''' % (eigenvectors if use_arnoldis else -1, anchorNodes if use_random_walk_pe else -1, numWalks if use_random_walk_pe else -1), end="")
 print("[" , end="")
-for i, v in enumerate(test_accuracy):
+for i, v in enumerate([x.cpu() for x in test_accuracy]):
     if i < len(test_accuracy) - 1:
         print("%f, " % (v) , end="")
     else:
