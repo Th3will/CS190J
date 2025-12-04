@@ -223,6 +223,32 @@ def arnoldi_encoding(hypergraph : xgi.Hypergraph, k : int, smallestOnly = True):
 # 1. Need to perform a baseline hypergraph transformer without positional encoding
     # I don't know how to input variable sized data into a transformer
 
+class SNetwork(nn.Module):
+    def __init__(self, in_channels, hidden_channels, out_channels, n_layers):
+        super().__init__()
+        
+        # Initial input layer
+        layers = [
+            nn.Linear(in_channels, hidden_channels),
+            nn.ReLU()
+        ]
+        
+        # Stack hidden layers
+        for _ in range(n_layers):
+            layers.append(nn.Linear(hidden_channels, hidden_channels))
+            layers.append(nn.ReLU())
+        
+        # Register layers as a Sequential block
+        self.net = nn.Sequential(*layers)
+
+        self.hyperedge_classifier = nn.Linear(hidden_channels, out_channels)
+
+    def forward(self, x, incidence_matrix):
+        nodeEmbeddings = self.net(x)
+
+        edgeEmbeddings = torch.mm(incidence_matrix.t(), nodeEmbeddings)
+
+        return self.hyperedge_classifier(edgeEmbeddings)
 
 class Network(torch.nn.Module):
     """Network class that initializes the AllSet model and readout layer.
@@ -280,12 +306,15 @@ class Network(torch.nn.Module):
 # %%
 # Hyperparameters
 
-use_arnoldis = True
+use_arnoldis = False
 eigenvectors = 4
 
 use_random_walk_pe = False
 anchorNodes = 0
 numWalks = 0
+
+
+num_epochs = 1000
 
 if len(sys.argv) > 1:
     i = 1
@@ -301,6 +330,9 @@ if len(sys.argv) > 1:
             anchorNodes = int(sys.argv[i])
             i += 1
             numWalks = int(sys.argv[i])
+        elif sys.argv[i].startswith("-e"):
+            i += 1
+            num_epochs = int(sys.argv[i])
         i += 1
 
 # %%
@@ -337,24 +369,23 @@ heads = 4
 n_layers = 1
 mlp_num_layers = 2
 
-# Readout hyperparameters
-out_channels = y.shape[1]
-
 # TODO: BEWAREEEEEE
 task_level = "edge" #"graph" if out_channels == 1 else "node"
+
+out_channels = y.shape[1]
 
 
 # %%
 
 print("Creating model")
 
-model = Network(
+model = SNetwork(
     in_channels=in_channels,
     hidden_channels=hidden_channels,
     out_channels=out_channels,
-    n_layers=n_layers,
-    mlp_num_layers=mlp_num_layers,
-    task_level=task_level,
+    n_layers=n_layers
+    # mlp_num_layers=mlp_num_layers,
+    # task_level=task_level,
 ).to(device)
 
 # Optimizer and loss
@@ -378,7 +409,6 @@ random.shuffle(train_mask)
 test_mask = [not x for x in train_mask]
 
 test_interval = 1
-num_epochs = 1000
 epoch_loss = []
 train_accuracy = []
 test_accuracy = []
