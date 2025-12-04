@@ -26,6 +26,9 @@ import sklearn.metrics
 
 from sklearn.utils.extmath import randomized_svd
 
+import pickle
+import os.path as osp
+
 import sys
 
 import time
@@ -42,7 +45,7 @@ if torch.cuda.is_available():
 # Helpers
 
 def coo2Sparse(coo) -> torch.Tensor:
-    if coo is not scipy.sparse.coo_array:
+    if not isinstance(coo, scipy.sparse.coo_array):
         coo = coo.tocoo()
     indices = np.vstack((coo.row, coo.col))
     values = coo.data
@@ -52,7 +55,48 @@ def coo2Sparse(coo) -> torch.Tensor:
     v = torch.FloatTensor(values)
     return torch.sparse_coo_tensor(i, v, torch.Size(shape))
 
-dataset = "walmart"
+dataset = "cora"
+
+if dataset == "cora":
+    # from AllSet loading
+    def getCora():
+        coraPath = "data/cocitation/cora/"
+        print(f'Loading hypergraph dataset from hyperGCN: {dataset}')
+
+        # first load node features:
+        with open(coraPath + 'features.pickle', 'rb') as f:
+            features = pickle.load(f)
+            features = features.todense()
+
+        with open(coraPath + 'labels.pickle', 'rb') as f:
+            labels = pickle.load(f)
+
+        num_nodes, feature_dim = features.shape
+        assert num_nodes == len(labels)
+        print(f'number of nodes:{num_nodes}, feature dimension: {feature_dim}')
+
+        features = torch.FloatTensor(features)
+        labels = torch.LongTensor(labels)
+
+        # The last, load hypergraph.
+        with open(coraPath + 'hypergraph.pickle', 'rb') as f:
+            # hypergraph in hyperGCN is in the form of a dictionary.
+            # { hyperedge: [list of nodes in the he], ...}
+            hypergraph = pickle.load(f)
+
+        print(f'number of hyperedges: {len(hypergraph)}')
+
+        # exploration
+        maxEdgeId = max(hypergraph)
+        for i in range(num_nodes):
+            hypergraph[maxEdgeId+i] = {i}
+        H = xgi.Hypergraph(hypergraph)
+        # H.cleanup(isolates=True, connected=False, relabel=False)
+
+        return H, features, labels
+
+    H, x_0s, y_indices = getCora()
+    incidence_1 = coo2Sparse(xgi.convert.to_incidence_matrix(H, sparse=True))
 
 # Parsing the walmart set:
 if dataset == "walmart":
@@ -73,12 +117,15 @@ if dataset == "walmart":
     oneHotY = np.zeros((len(y), numClasses))
     oneHotY[np.arange(len(y)), y] = 1
 
-    y = oneHotY
-    y = torch.Tensor(y)
+    #y = oneHotY
+    y_indices = torch.tensor(df_triptype_labels) - 1  # 0-based indices
+    #y = torch.Tensor(y)
 
     df_n = pd.read_csv('data/walmart/walmart-nodes.tsv', sep='\t')
     df_categories = np.array(df_n["category"], dtype=np.int64)
     df_nodes = df_n["node_id"].to_list()
+
+    node_cat_map = dict(zip(df_nodes, df_categories))
 
     df = df_he
 
@@ -92,17 +139,26 @@ if dataset == "walmart":
     isolates = H.nodes.isolates()
     H.remove_nodes_from(isolates)
 
-    # Map original node IDs to their categories
-    node_cat_map = dict(zip(df_nodes, df_categories))
+    incidence_1, node_idx_map, edge_idx_map = xgi.convert.to_incidence_matrix(H, sparse=True, index=True)
+    incidence_1 = coo2Sparse(incidence_1)
 
-    # Re-build df_categories to match the current H.nodes order exactly
-    # This prevents dimension mismatch in the torch tensor creation below
-    df_categories = np.array([node_cat_map[n] for n in H.nodes])
+    # 1. Align Node Features (You were already doing this mostly correctly)
+    final_node_order = [node_idx_map[i] for i in range(len(node_idx_map))]
+    df_categories = np.array([node_cat_map[n] for n in final_node_order])
+    # ... create x_0s based on this ...
 
-    incidence_1 = coo2Sparse(xgi.convert.to_incidence_matrix(H, sparse=True))
+    # 2. Align Edge Labels (CRITICAL MISSING STEP)
+    # edge_idx_map maps { xgi_edge_id : matrix_column_index }
+    # We need the reverse: for matrix column 0, which df index was it?
+    sorted_edge_indices = sorted(edge_idx_map.items(), key=lambda item: item[1])
+    original_df_indices = [k for k, v in sorted_edge_indices]
 
-    numClasses = np.max(df_categories)
-    x_0s = torch.zeros(H.num_nodes, numClasses)
+    # Reorder y to match the matrix columns
+    y_aligned = np.array(df_triptype_labels)[original_df_indices] 
+    y_indices = torch.tensor(y_aligned) - 1
+
+    numCategories = np.max(df_categories)
+    x_0s = torch.zeros(H.num_nodes, numCategories)
     x_0s[torch.arange(H.num_nodes), torch.tensor(df_categories - 1)] = 1
     x_0s = x_0s.to_sparse_coo()
     # x_0s = torch.zeros((H.nodes, numClasses))
@@ -201,20 +257,16 @@ def arnoldi_encoding(hypergraph : xgi.Hypergraph, k : int, smallestOnly = True):
     )
 
     n = laplacian.shape[0]
-    
-    DETERMINISM_EIGS_L = np.random.rand(n, k)
-    DETERMINISM_EIGS_S = np.random.rand(n, k)
-    
-    # 2. Run LOBPCG
-    # largest=False targets the smallest eigenvalues
-    # tol=1e-2 is "loose" but sufficient for clustering/embeddings
+
     kLargest = torch.from_numpy(np.zeros((hypergraph.num_nodes,0)))
     if not smallestOnly:
         k = k//2
-        kLargest = torch.from_numpy(np.real(scipy.sparse.linalg.lobpcg(laplacian, DETERMINISM_EIGS_L, largest=True, tol=1e-2)[1]))
-        
-    kSmallest = torch.from_numpy(np.real(scipy.sparse.linalg.lobpcg(laplacian, DETERMINISM_EIGS_S, largest=False, tol=1e-2)[1]))
+        DETERMINISM_EIGS_L = np.random.rand(n, k)
+        kLargest = torch.from_numpy(np.real(scipy.sparse.linalg.lobpcg(laplacian, DETERMINISM_EIGS_L, largest=True, tol=1e-4)[1]))
 
+    DETERMINISM_EIGS_S = np.random.rand(n, k)
+    
+    kSmallest = torch.from_numpy(np.real(scipy.sparse.linalg.lobpcg(laplacian, DETERMINISM_EIGS_S, largest=False, tol=1e-4)[1]))
 
     return torch.cat((kLargest, kSmallest), axis=1).to_sparse()
 
@@ -223,33 +275,145 @@ def arnoldi_encoding(hypergraph : xgi.Hypergraph, k : int, smallestOnly = True):
 # 1. Need to perform a baseline hypergraph transformer without positional encoding
     # I don't know how to input variable sized data into a transformer
 
-class SNetwork(nn.Module):
-    def __init__(self, in_channels, hidden_channels, out_channels, n_layers):
+class LinearSelfAttention(nn.Module):
+    def __init__(self, dim, heads=4, dropout=0.1):
+        super().__init__()
+        assert dim % heads == 0, "Hidden dimension must be divisible by heads."
+        
+        self.heads = heads
+        self.head_dim = dim // heads
+        self.scale = self.head_dim ** -0.5
+        
+        # Q, K, V projections
+        self.to_qkv = nn.Linear(dim, dim * 3, bias=False)
+        
+        self.to_out = nn.Sequential(
+            nn.Linear(dim, dim),
+            nn.Dropout(dropout)
+        )
+
+    def forward(self, x):
+        # x shape: (Batch, N, Dim)
+        b, n, d = x.shape
+        h = self.heads
+        
+        # 1. Project Q, K, V
+        qkv = self.to_qkv(x).chunk(3, dim=-1)
+        q, k, v = map(lambda t: t.reshape(b, n, h, -1).transpose(1, 2), qkv)
+        # Shapes are now (Batch, Heads, N, Head_Dim)
+
+        # 2. Apply Feature Map (The "Kernel Trick")
+        # ELU + 1 is a common approximation for Softmax that keeps values positive
+        q = F.elu(q) + 1
+        k = F.elu(k) + 1
+
+        # 3. Linear Attention Computation
+        # Standard: softmax(Q @ K.T) @ V  -> Complexity O(N^2)
+        # Linear:   Q @ (K.T @ V)         -> Complexity O(N)
+        
+        # kv = (K.T @ V). We sum over N here.
+        # Shape: (Batch, Heads, Head_Dim, Head_Dim)
+        kv = torch.einsum('bhnd,bhne->bhde', k, v)
+        
+        # z = 1 / (Q @ K.sum(dim=1)) - Normalization factor
+        z = 1 / (torch.einsum('bhnd,bhd->bhn', q, k.sum(dim=2)) + 1e-6)
+        
+        # out = (Q @ kv) * z
+        out = torch.einsum('bhnd,bhde->bhne', q, kv) * z.unsqueeze(-1)
+        
+        # 4. Reshape back
+        out = out.transpose(1, 2).reshape(b, n, d)
+        return self.to_out(out)
+
+class LinearTransformerBlock(nn.Module):
+    """
+    Replaces a standard TransformerEncoderLayer but uses Linear Attention
+    """
+    def __init__(self, dim, heads, dropout=0.1, mlp_dim=None):
+        super().__init__()
+        mlp_dim = mlp_dim or dim * 4
+        
+        self.norm1 = nn.LayerNorm(dim)
+        self.attn = LinearSelfAttention(dim, heads=heads, dropout=dropout)
+        
+        self.norm2 = nn.LayerNorm(dim)
+        self.mlp = nn.Sequential(
+            nn.Linear(dim, mlp_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(mlp_dim, dim),
+            nn.Dropout(dropout)
+        )
+
+    def forward(self, x):
+        # Residual connections are handled here
+        x = x + self.attn(self.norm1(x))
+        x = x + self.mlp(self.norm2(x))
+        return x
+
+class STransformer2(nn.Module):
+    def __init__(self, in_channels, hidden_channels, out_channels, n_layers, nhead=4):
         super().__init__()
         
-        # Initial input layer
-        layers = [
-            nn.Linear(in_channels, hidden_channels),
-            nn.ReLU()
-        ]
+        self.embedding = nn.Linear(in_channels, hidden_channels)
         
-        # Stack hidden layers
-        for _ in range(n_layers):
-            layers.append(nn.Linear(hidden_channels, hidden_channels))
+        # REPLACED: Standard Transformer -> Stack of Linear Blocks
+        self.layers = nn.ModuleList([
+            LinearTransformerBlock(dim=hidden_channels, heads=nhead)
+            for _ in range(n_layers)
+        ])
+        
+        self.fc_out = nn.Linear(hidden_channels, out_channels)
+
+    def forward(self, x, incidence_1):
+        # x input: (N, In_Channels)
+        
+        x = self.embedding(x) # (N, Hidden)
+        
+        # Unsqueeze batch dim: (1, N, Hidden)
+        x = x.unsqueeze(0) 
+        
+        # Apply Linear Transformer Layers
+        for layer in self.layers:
+            x = layer(x)
+            
+        x = x.squeeze(0) # Back to (N, Hidden)
+
+        # Message Passing (Node -> Hyperedge aggregation)
+        # hyperedge_degrees = torch.sparse.sum(incidence_1, dim=0).to_dense()
+        # hyperedge_degrees = hyperedge_degrees.clamp(min=1).unsqueeze(1) 
+
+        # x = torch.mm(incidence_1.t(), x) # WALMART
+        # x = x / hyperedge_degrees 
+
+        return self.fc_out(x)
+    
+class MLP(nn.Module):
+    def __init__(self, in_channels, hidden_channels, out_channels, n_layers):
+        super().__init__()
+        layers = []
+        
+        # Handle the single layer case specifically
+        if n_layers == 1:
+            layers.append(nn.Linear(in_channels, out_channels))
+        else:
+            # Input layer
+            layers.append(nn.Linear(in_channels, hidden_channels))
             layers.append(nn.ReLU())
-        
-        # Register layers as a Sequential block
+            
+            # Hidden layers
+            for _ in range(n_layers - 2):
+                layers.append(nn.Linear(hidden_channels, hidden_channels))
+                layers.append(nn.ReLU())
+            
+            # Output layer
+            layers.append(nn.Linear(hidden_channels, out_channels))
+            
         self.net = nn.Sequential(*layers)
 
-        self.hyperedge_classifier = nn.Linear(hidden_channels, out_channels)
-
-    def forward(self, x, incidence_matrix):
-        nodeEmbeddings = self.net(x)
-
-        edgeEmbeddings = torch.mm(incidence_matrix.t(), nodeEmbeddings)
-
-        return self.hyperedge_classifier(edgeEmbeddings)
-
+    def forward(self, x, incidence):
+        return self.net(x)
+    
 class Network(torch.nn.Module):
     """Network class that initializes the AllSet model and readout layer.
 
@@ -342,7 +506,7 @@ print("Adding encodings...")
 x = x_0s
 if use_arnoldis:
     arnoldis = arnoldi_encoding(hypergraph=H, k=eigenvectors)
-    x_0s = torch.cat([x_0s, arnoldis], axis=1)
+    x_0s = torch.cat([x_0s, arnoldis.to_dense()], dim=1)
 
 if use_random_walk_pe:
     rw_pe = anchor_positional_encoding(
@@ -350,36 +514,37 @@ if use_random_walk_pe:
         anchor_nodes=random.sample(range(incidence_1.shape[0]), k=anchorNodes),
         iterations=numWalks
     )
-    x_0s = torch.cat([x_0s, rw_pe], dim=1)
+    x_0s = torch.cat([x_0s, rw_pe.to_dense()], dim=1)
 
 # %% 
 
 x, incidence_1, y = (
     x_0s.to_dense().float().to(device),
     incidence_1.to_sparse().float().to(device),
-    y.to(device),
+    y_indices.to(device),
 )
 
 
 # Base model hyperparameters
 in_channels = x.shape[1]
-hidden_channels = 128
+hidden_channels = 32
 
 heads = 4
 n_layers = 1
 mlp_num_layers = 2
 
 # TODO: BEWAREEEEEE
-task_level = "edge" #"graph" if out_channels == 1 else "node"
+task_level = "node" #"graph" if out_channels == 1 else "node"
 
-out_channels = y.shape[1]
+# out_channels = numClasses # WALMART
+out_channels = max(y_indices) + 1
 
 
 # %%
 
 print("Creating model")
 
-model = SNetwork(
+model = STransformer2(
     in_channels=in_channels,
     hidden_channels=hidden_channels,
     out_channels=out_channels,
@@ -396,15 +561,17 @@ loss_fn = torch.nn.CrossEntropyLoss()
 
 
 # Accuracy
-def acc_fn(y, y_hat):
-    return (y.argmax(dim=1) == y_hat.argmax(dim=1)).float().mean()
+def acc_fn(y_hat, y):
+    return (y == y_hat.argmax(dim=1)).float().mean()
 
 
 # %%
 # create masking for training
-TRAIN_TEST_SPLIT_RATIO = 0.8
-trainSize = int(len(df)*TRAIN_TEST_SPLIT_RATIO)
-train_mask = [True]*int(trainSize) + [False]*int(len(df)-trainSize)
+TRAIN_TEST_SPLIT_RATIO = 0.95
+# outsize = len(df) # WALMART
+outsize = H.num_nodes
+trainSize = int(outsize*TRAIN_TEST_SPLIT_RATIO)
+train_mask = [True]*int(trainSize) + [False]*int(outsize-trainSize)
 random.shuffle(train_mask)
 test_mask = [not x for x in train_mask]
 
@@ -426,7 +593,7 @@ for epoch_i in range(1, num_epochs + 1):
     loss.backward()
     opt.step()
     epoch_loss.append(loss.item())
-    train_accuracy.append(acc_fn(y_hat[train_mask], y[train_mask]))
+    train_accuracy.append(acc_fn(y_hat[train_mask], y[train_mask]).item())
 
     if epoch_i % test_interval == 0:
         model.eval()
@@ -451,24 +618,24 @@ print(f"Total took {time.perf_counter() - begin} seconds.")
 model.eval()
 y_hat = model(x, incidence_1)
 y_hat = y_hat.argmax(dim=1).cpu().numpy()
-cm = sklearn.metrics.confusion_matrix(y.argmax(dim=1).cpu(),y_hat)
+cm = sklearn.metrics.confusion_matrix(y.cpu(),y_hat)
 # confusion_matrixes.append(cm)
 
-# %%
-from matplotlib import pyplot as plt
-plt.title("Accuracy over Epochs\nRW (walk size %d, %d anchors) PEs" % (numWalks, anchorNodes))
+# # %%
+# from matplotlib import pyplot as plt
+# plt.title("Accuracy over Epochs\nRW (walk size %d, %d anchors) PEs" % (numWalks, anchorNodes))
 
-plt.xlabel("Epoch")
-plt.ylabel("Accuracy")
-plt.ylim((0, 1))
-plt.plot(np.arange(num_epochs, step=test_interval), [x.cpu() for x in test_accuracy], label="Test")
-plt.plot([x.cpu() for x in train_accuracy], label="Train")
-plt.legend()
+# plt.xlabel("Epoch")
+# plt.ylabel("Accuracy")
+# plt.ylim((0, 1))
+# plt.plot(np.arange(num_epochs, step=test_interval), [x.cpu() for x in test_accuracy], label="Test")
+# plt.plot([x.cpu() for x in train_accuracy], label="Train")
+# plt.legend()
 
-disp = sklearn.metrics.ConfusionMatrixDisplay(confusion_matrix=cm)
-disp.plot()
-plt.title("RW+Arnoldi-PE confusion matrix")
-plt.show()
+# disp = sklearn.metrics.ConfusionMatrixDisplay(confusion_matrix=cm)
+# disp.plot()
+# plt.title("RW+Arnoldi-PE confusion matrix")
+# plt.show()
 
 # %%
 
