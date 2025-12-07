@@ -30,9 +30,11 @@ import sys
 
 import time
 
-random.seed(42)
-np.random.seed(42)
-torch.manual_seed(42)
+seed = 0
+
+random.seed(seed)
+np.random.seed(seed)
+torch.manual_seed(seed)
 torch.use_deterministic_algorithms(True)
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -52,98 +54,97 @@ def coo2Sparse(coo) -> torch.Tensor:
     v = torch.FloatTensor(values)
     return torch.sparse_coo_tensor(i, v, torch.Size(shape))
 
-dataset = "walmart"
+def load_data(dataset="walmart"):
+    # Parsing the walmart set:
+    if dataset == "walmart":
+        df_he = pd.read_csv('data/walmart/walmart-hyperedges.tsv', sep='\t')
+        df_hyper_edges = df_he["nodes"].to_list()
+        df_hyper_edges = list(map(lambda x: list(map(int, x.split(','))), df_hyper_edges))
 
-# Parsing the walmart set:
-if dataset == "walmart":
-    df_he = pd.read_csv('data/walmart/walmart-hyperedges.tsv', sep='\t')
-    df_hyper_edges = df_he["nodes"].to_list()
-    df_hyper_edges = list(map(lambda x: list(map(int, x.split(','))), df_hyper_edges))
+        df_day_of_week_features = df_he["dayofweek"].to_list()
+        df_day_of_week_features = list(map(lambda x: [int(x)], df_day_of_week_features))
 
-    df_day_of_week_features = df_he["dayofweek"].to_list()
-    df_day_of_week_features = list(map(lambda x: [int(x)], df_day_of_week_features))
+        df_triptype_labels = df_he["triptype"].to_list()
+        df_triptype_labels = list(map(int, df_triptype_labels))
 
-    df_triptype_labels = df_he["triptype"].to_list()
-    df_triptype_labels = list(map(int, df_triptype_labels))
+        # y = torch.Tensor(df_triptype_labels)
+        y = [i if i != 999 else 44 for i in df_triptype_labels]
 
-    # y = torch.Tensor(df_triptype_labels)
-    y = [i if i != 999 else 44 for i in df_triptype_labels]
-    y_indicies = torch.LongTensor(y)
 
-    numCategories = np.max(y) + 1
-    oneHotY = np.zeros((len(y), numCategories))
-    oneHotY[np.arange(len(y)), y] = 1
+        numCategories = np.max(y) + 1
+        oneHotY = np.zeros((len(y), numCategories))
+        oneHotY[np.arange(len(y)), y] = 1
 
-    y = oneHotY
-    y = torch.Tensor(y)
+        y = oneHotY
+        y = torch.Tensor(y)
 
-    df_n = pd.read_csv('data/walmart/walmart-nodes.tsv', sep='\t')
-    df_categories = np.array(df_n["category"], dtype=np.int64)
-    df_nodes = df_n["node_id"].to_list()
+        df_n = pd.read_csv('data/walmart/walmart-nodes.tsv', sep='\t')
+        df_categories = np.array(df_n["category"], dtype=np.int64)
+        df_nodes = df_n["node_id"].to_list()
 
-    df = df_he
+        df = df_he
 
-    # Nodes are not ordered by default in xgi so need to make sure 
-    H = xgi.Hypergraph()
+        # Nodes are not ordered by default in xgi so need to make sure 
+        H = xgi.Hypergraph()
+        
+        H.add_nodes_from(df_nodes)
+        for he in df_hyper_edges:
+            H.add_edge(he)
+        
+        isolates = H.nodes.isolates()
+        H.remove_nodes_from(isolates)
+
+        # Map original node IDs to their categories
+        node_cat_map = dict(zip(df_nodes, df_categories))
+
+        # Re-build df_categories to match the current H.nodes order exactly
+        # This prevents dimension mismatch in the torch tensor creation below
+        df_categories = np.array([node_cat_map[n] for n in H.nodes])
+
+        incidence_1 = coo2Sparse(xgi.convert.to_incidence_matrix(H, sparse=True))
+
+        numClasses = np.max(df_categories)
+        x_0s = torch.zeros(H.num_nodes, numClasses)
+        x_0s[torch.arange(H.num_nodes), torch.tensor(df_categories - 1)] = 1
+        x_0s = x_0s.to_sparse_coo()
+        # x_0s = torch.zeros((H.nodes, numClasses))
+        # x_0s[torch.arange(len(df_categories)), df_categories - 1] = 1
     
-    H.add_nodes_from(df_nodes)
-    for he in df_hyper_edges:
-        H.add_edge(he)
+
+
+    elif dataset == "zoo":
+        df = pd.read_csv('data/zoo/zoo.data')
+        y = [i - 1 for i in df["type"].to_list()]
+
+        numClasses = np.max(y) + 1
+        oneHotY = np.zeros((len(y), numClasses))
+        oneHotY[np.arange(len(y)), y] = 1
+
+        y = oneHotY
+
+        num_nodes = df.shape[0]
+        ## remove the animal names column
+        df_bool_matrix = df.drop(columns=["animal","legs","type"]).values.tolist()
+
+        df_bool_matrix = list(map(lambda x: list(map(int, x)), df_bool_matrix))
+        df_neg_bool_matrix = list(map(lambda x: list(map(lambda y: -y + 1, x)), df_bool_matrix))
+
+        ## process legs
+        leg_values = [0,2,4,5,6,8]
+        df_legs = pd.DataFrame({"%d legs" % i : df["legs"] == i for i in leg_values}, index=df.index)
+        
+        incidence_1 = np.concatenate([df_bool_matrix, df_neg_bool_matrix, df_legs], axis=1)
+        H = xgi.Hypergraph(incidence_1)
+        H.cleanup(isolates=True, in_place=True)
+        x_0s = np.zeros(shape=(num_nodes,0))
+        
+        # pos_hypergraph = xgi.convert.from_incidence_matrix(df_bool_matrix)
+
+        incidence_1 = torch.from_numpy(incidence_1).to_sparse()
+        # calculate incidence matrix
+        # incidence_1 = coo_array(np.array(df_nodes))
     
-    isolates = H.nodes.isolates()
-    H.remove_nodes_from(isolates)
-
-    # Map original node IDs to their categories
-    node_cat_map = dict(zip(df_nodes, df_categories))
-
-    # Re-build df_categories to match the current H.nodes order exactly
-    # This prevents dimension mismatch in the torch tensor creation below
-    df_categories = np.array([node_cat_map[n] for n in H.nodes])
-
-    incidence_1 = coo2Sparse(xgi.convert.to_incidence_matrix(H, sparse=True))
-
-    numClasses = np.max(df_categories)
-    x_0s = torch.zeros(H.num_nodes, numClasses)
-    x_0s[torch.arange(H.num_nodes), torch.tensor(df_categories - 1)] = 1
-    x_0s = x_0s.to_sparse_coo()
-    # x_0s = torch.zeros((H.nodes, numClasses))
-    # x_0s[torch.arange(len(df_categories)), df_categories - 1] = 1
-    
-
-
-elif dataset == "zoo":
-    df = pd.read_csv('data/zoo/zoo.data')
-    y = [i - 1 for i in df["type"].to_list()]
-
-    numClasses = np.max(y) + 1
-    oneHotY = np.zeros((len(y), numClasses))
-    oneHotY[np.arange(len(y)), y] = 1
-
-    y = oneHotY
-
-    num_nodes = df.shape[0]
-    ## remove the animal names column
-    df_bool_matrix = df.drop(columns=["animal","legs","type"]).values.tolist()
-
-    df_bool_matrix = list(map(lambda x: list(map(int, x)), df_bool_matrix))
-    df_neg_bool_matrix = list(map(lambda x: list(map(lambda y: -y + 1, x)), df_bool_matrix))
-
-    ## process legs
-    leg_values = [0,2,4,5,6,8]
-    df_legs = pd.DataFrame({"%d legs" % i : df["legs"] == i for i in leg_values}, index=df.index)
-    
-    incidence_1 = np.concatenate([df_bool_matrix, df_neg_bool_matrix, df_legs], axis=1)
-    H = xgi.Hypergraph(incidence_1)
-    H.cleanup(isolates=True, in_place=True)
-    x_0s = np.zeros(shape=(num_nodes,0))
-    
-    # pos_hypergraph = xgi.convert.from_incidence_matrix(df_bool_matrix)
-
-    incidence_1 = torch.from_numpy(incidence_1).to_sparse()
-    # calculate incidence matrix
-    # incidence_1 = coo_array(np.array(df_nodes))
-
-
+    return H, x_0s, incidence_1, y, df, numCategories
 
 #%%
 def hypergraph_random_walk(incidence_matrix):
@@ -188,7 +189,7 @@ def anchor_positional_encoding(hypergraph: xgi.Hypergraph, anchor_nodes, iterati
     for _ in range(iterations):
         anchor_node = transition_mat @ anchor_node
 
-    return torch.tensor(anchor_node)
+    return anchor_node
 
 #%%
 def arnoldi_encoding(hypergraph : xgi.Hypergraph, k : int, smallestOnly = True):
@@ -222,7 +223,7 @@ def arnoldi_encoding(hypergraph : xgi.Hypergraph, k : int, smallestOnly = True):
 # %% Actual ML stuff
 # Where do we go from here?
 # 1. Need to perform a baseline hypergraph transformer without positional encoding
-    # I don't know how to input variable sized data into a transformer
+#     I don't know how to input variable sized data into a transformer
 
 class SNetwork(nn.Module):
     def __init__(self, in_channels, hidden_channels, out_channels, n_layers):
@@ -308,183 +309,213 @@ class Network(torch.nn.Module):
 # Hyperparameters
 
 use_arnoldis = False
-eigenvectors = 4
+eigenvectors = 2
 
-use_random_walk_pe = False
-anchorNodes = 0
-numWalks = 0
-
-
-num_epochs = 1000
-
-if len(sys.argv) > 1:
-    i = 1
-    while i < len(sys.argv):
-        if sys.argv[i].startswith("-a"):
-            use_arnoldis = True
-            i += 1
-            eigenvectors = int(sys.argv[i])
-            i += 1
-        elif sys.argv[i].startswith("-w"):
-            use_random_walk_pe = True
-            i += 1
-            anchorNodes = int(sys.argv[i])
-            i += 1
-            numWalks = int(sys.argv[i])
-        elif sys.argv[i].startswith("-e"):
-            i += 1
-            num_epochs = int(sys.argv[i])
-        i += 1
+use_random_walk_pe = True
+anchorNodes = 1000
+numWalks = 3
 
 # %%
-## add encodings
-print("Adding encodings...")
 
-x = x_0s
-if use_arnoldis:
-    arnoldis = arnoldi_encoding(hypergraph=H, k=eigenvectors)
-    x_0s = torch.cat([x_0s, arnoldis], axis=1)
+def add_positional_encoding(H, x_0s, incidence_1, use_arnoldis, eigenvectors, use_random_walk_pe, anchorNodes, numWalks):
+    if use_arnoldis:
+        arnoldis = arnoldi_encoding(hypergraph=H, k=eigenvectors)
+        x_0s = torch.cat([x_0s, arnoldis], axis=1)
 
-if use_random_walk_pe:
-    rw_pe = anchor_positional_encoding(
-        hypergraph=H,
-        anchor_nodes=random.sample(range(incidence_1.shape[0]), k=anchorNodes),
-        iterations=numWalks
+    if use_random_walk_pe:
+        rw_pe = anchor_positional_encoding(
+            hypergraph=H,
+            anchor_nodes=random.sample(range(incidence_1.shape[0]), k=anchorNodes),
+            iterations=numWalks
+        )
+        x_0s = torch.cat([x_0s, rw_pe], dim=1)
+    
+    return x_0s
+
+def train_model(x_0s, incidence_1, y, df, num_epochs=20, test_interval=1, hidden_channels=128, heads=4, n_layers=1, mlp_num_layers=2):
+    x, incidence_1, y = (
+        x_0s.to_dense().float().to(device),
+        incidence_1.to_sparse().float().to(device),
+        y.to(device),
     )
-    x_0s = torch.cat([x_0s, rw_pe], dim=1)
 
-# %% 
+    # Base model hyperparameters
+    in_channels = x.shape[1]
+    hidden_channels = 128
 
-x, incidence_1, y = (
-    x_0s.to_dense().float().to(device),
-    incidence_1.to_sparse().float().to(device),
-    y_indicies.to(device),
-)
+    heads = 4
+    n_layers = 1
+    mlp_num_layers = 2
 
+    # Readout hyperparameters
+    out_channels = y.shape[1]
 
-# Base model hyperparameters
-in_channels = x.shape[1]
-hidden_channels = 128
+    # TODO: BEWAREEEEEE
+    task_level = "edge" #"graph" if out_channels == 1 else "node"
 
-heads = 4
-n_layers = 1
-mlp_num_layers = 2
+    out_channels = numCategories
 
-# TODO: BEWAREEEEEE
-task_level = "edge" #"graph" if out_channels == 1 else "node"
+    # print("Creating model")
 
-out_channels = numCategories
+    model = Network(
+        in_channels=in_channels,
+        hidden_channels=hidden_channels,
+        out_channels=out_channels,
+        n_layers=n_layers,
+        mlp_num_layers=mlp_num_layers,
+        task_level=task_level,
+    ).to(device)
 
+    # Optimizer and loss
+    opt = torch.optim.Adam(model.parameters(), lr=0.001)
 
-# %%
+    # Categorial cross-entropy loss
+    loss_fn = torch.nn.CrossEntropyLoss()
 
-print("Creating model")
+    # Accuracy
+    def acc_fn(y_hat, y):
+        return (y.argmax(dim=1) == y_hat.argmax(dim=1)).float().mean()
 
-model = Network(
-    in_channels=in_channels,
-    hidden_channels=hidden_channels,
-    out_channels=out_channels,
-    n_layers=n_layers,
-    mlp_num_layers=mlp_num_layers,
-    task_level=task_level,
-).to(device)
+    # create masking for training
+    TRAIN_TEST_SPLIT_RATIO = 0.8
+    trainSize = int(len(df)*TRAIN_TEST_SPLIT_RATIO)
+    train_mask = [True]*int(trainSize) + [False]*int(len(df)-trainSize)
+    random.shuffle(train_mask)
+    test_mask = [not x for x in train_mask]
 
-# Optimizer and loss
-opt = torch.optim.Adam(model.parameters(), lr=0.001)
+    test_interval = 1
+    epoch_loss = []
+    train_accuracy = []
+    test_accuracy = []
+    # print("Starting training")
+    begin = time.perf_counter()
+    for epoch_i in range(1, num_epochs + 1):
+        model.train()
 
-# Categorial cross-entropy loss
-loss_fn = torch.nn.CrossEntropyLoss()
+        opt.zero_grad()
 
-
-# Accuracy
-def acc_fn(y_hat, y):
-    return (y == y_hat.argmax(dim=1)).float().mean()
-
-
-# %%
-# create masking for training
-TRAIN_TEST_SPLIT_RATIO = 0.8
-trainSize = int(len(df)*TRAIN_TEST_SPLIT_RATIO)
-train_mask = [True]*int(trainSize) + [False]*int(len(df)-trainSize)
-random.shuffle(train_mask)
-test_mask = [not x for x in train_mask]
-
-test_interval = 1
-epoch_loss = []
-train_accuracy = []
-test_accuracy = []
-print("Starting training")
-begin = time.perf_counter()
-for epoch_i in range(1, num_epochs + 1):
-    model.train()
-
-    opt.zero_grad()
-
-    # Extract edge_index from sparse incidence matrix
-    y_hat = model(x, incidence_1)
-    loss = loss_fn(y_hat[train_mask], y[train_mask])
-
-    loss.backward()
-    opt.step()
-    epoch_loss.append(loss.item())
-    train_accuracy.append(acc_fn(y_hat[train_mask], y[train_mask]))
-
-    if epoch_i % test_interval == 0:
-        model.eval()
-
+        # Extract edge_index from sparse incidence matrix
         y_hat = model(x, incidence_1)
         loss = loss_fn(y_hat[train_mask], y[train_mask])
 
-        print(f"Epoch: {epoch_i} ")
-        print(
-            f"Train_loss: {np.mean(epoch_loss):.4f}, acc: {acc_fn(y_hat[train_mask], y[train_mask]):.4f}",
-            flush=True,
-        )
-        test_accuracy.append(acc_fn(y_hat[test_mask], y[test_mask]))
+        loss.backward()
+        opt.step()
+        epoch_loss.append(loss.item())
+        train_accuracy.append(acc_fn(y_hat[train_mask], y[train_mask]))
 
-        loss = loss_fn(y_hat[test_mask], y[test_mask])
-        print(
-            f"Test_loss: {loss:.4f}, Test_acc: {acc_fn(y_hat[test_mask], y[test_mask]):.4f}",
-            flush=True,
-        )
+        if epoch_i % test_interval == 0:
+            model.eval()
+            y_hat = model(x, incidence_1)
 
-print(f"Total took {time.perf_counter() - begin} seconds.")
-model.eval()
-y_hat = model(x, incidence_1)
-y_hat = y_hat.argmax(dim=1).cpu().numpy()
-cm = sklearn.metrics.confusion_matrix(y.cpu(),y_hat)
-# confusion_matrixes.append(cm)
+            # print(f"Epoch: {epoch_i} ")
+            # loss = loss_fn(y_hat[train_mask], y[train_mask])
+            # print(
+            #     f"Train_loss: {np.mean(epoch_loss):.4f}, acc: {acc_fn(y_hat[train_mask], y[train_mask]):.4f}",
+            #     flush=True,
+            # )
+            test_accuracy.append(acc_fn(y_hat[test_mask], y[test_mask]))
 
-# %%
-from matplotlib import pyplot as plt
-plt.title("Accuracy over Epochs\nRW (walk size %d, %d anchors) PEs" % (numWalks, anchorNodes))
-
-plt.xlabel("Epoch")
-plt.ylabel("Accuracy")
-plt.ylim((0, 1))
-plt.plot(np.arange(num_epochs, step=test_interval), [x.cpu() for x in test_accuracy], label="Test")
-plt.plot([x.cpu() for x in train_accuracy], label="Train")
-plt.legend()
-
-disp = sklearn.metrics.ConfusionMatrixDisplay(confusion_matrix=cm)
-disp.plot()
-plt.title("RW+Arnoldi-PE confusion matrix")
-plt.show()
+            # loss = loss_fn(y_hat[test_mask], y[test_mask])
+            # print(
+            #     f"Test_loss: {loss:.4f}, Test_acc: {acc_fn(y_hat[test_mask], y[test_mask]):.4f}",
+            #     flush=True,
+            # )
+    print(f"Total took {time.perf_counter() - begin} seconds.")
+    model.eval()
+    y_hat = model(x, incidence_1)
+    y_hat = y_hat.argmax(dim=1).cpu().numpy()
+    cm = sklearn.metrics.confusion_matrix(y.argmax(dim=1).cpu(),y_hat)
+    
+    return model, train_accuracy, test_accuracy, cm
 
 # %%
+if __name__ == "__main__":
+    dataset = "walmart"
+    H, x_0s_base, incidence_1, y, df, numCategories = load_data(dataset)
+    
+    use_arnoldis = False
+    eigenvectors = 2
+    use_random_walk_pe = True
+    
+    # Parameter ranges
+    anchor_nodes_list = [10, 100, 1000, 10000]
+    num_walks_list = [1, 3, 5, 10]
+    
+    num_epochs = 200 # Reduced for sweep speed
+    test_interval = 1
+    
+    results = []
 
-print('''{
-    "eigenvectors" : %d,
-    "anchorNodes" : %d,
-    "walks" : %d,     
-    "testAcc" : ''' % (eigenvectors if use_arnoldis else -1, anchorNodes if use_random_walk_pe else -1, numWalks if use_random_walk_pe else -1), end="")
-print("[" , end="")
-for i, v in enumerate([x.cpu() for x in test_accuracy]):
-    if i < len(test_accuracy) - 1:
-        print("%f, " % (v) , end="")
+    print(f"Running Baseline")
+
+    x_0s = x_0s_base.clone()
+    
+    model, train_accuracy, test_accuracy, cm = train_model(x_0s, incidence_1, y, df, num_epochs=num_epochs, test_interval=test_interval)
+    
+    final_test_acc = test_accuracy[-1].cpu().item()
+    print(f"Baseline Final Test Acc: {final_test_acc:.4f}")
+
+    if len(sys.argv) > 1:
+        i = 1
+        while i < len(sys.argv):
+            if sys.argv[i].startswith("-a"):
+                use_arnoldis = True
+                i += 1
+                eigenvectors = int(sys.argv[i])
+                i += 1
+            elif sys.argv[i].startswith("-w"):
+                use_random_walk_pe = True
+                i += 1
+                anchorNodes = int(sys.argv[i])
+                i += 1
+                numWalks = int(sys.argv[i])
+            elif sys.argv[i].startswith("-e"):
+                i += 1
+                num_epochs = int(sys.argv[i])
+            i += 1
+
+        print(f"Running with anchorNodes={anchorNodes}, numWalks={numWalks}")
+        
+        x_0s = x_0s_base.clone()
+        
+        x_0s = add_positional_encoding(H, x_0s, incidence_1, use_arnoldis, eigenvectors, use_random_walk_pe, anchorNodes, numWalks)
+    
+        model, train_accuracy, test_accuracy, cm = train_model(x_0s, incidence_1, y, df, num_epochs=num_epochs, test_interval=test_interval)
     else:
-        print("%f]" % v)
+        for anchorNodes in anchor_nodes_list:
+            for numWalks in num_walks_list:
+                print(f"Running with anchorNodes={anchorNodes}, numWalks={numWalks}")
+                
+                # Reset x_0s to base for each run
+                x_0s = x_0s_base.clone()
+                
+                x_0s = add_positional_encoding(H, x_0s, incidence_1, use_arnoldis, eigenvectors, use_random_walk_pe, anchorNodes, numWalks)
+            
+                model, train_accuracy, test_accuracy, cm = train_model(x_0s, incidence_1, y, df, num_epochs=num_epochs, test_interval=test_interval)
+            
+                final_test_acc = test_accuracy[-1].cpu().item()
+                print(f"Anchors: {anchorNodes}, Walks: {numWalks}, Final Test Acc: {final_test_acc:.4f}")
+                results.append({
+                    "anchorNodes": anchorNodes,
+                    "numWalks": numWalks,
+                    "final_test_acc": final_test_acc,
+                    "test_accuracy": [x.cpu().item() for x in test_accuracy]
+                })
 
+        print("\n--- Parameter Sweep Results ---")
+        for res in results:
+            print(f"Anchors: {res['anchorNodes']}, Walks: {res['numWalks']}, Final Test Acc: {res['final_test_acc']:.4f}")
 
-
-
+        from matplotlib import pyplot as plt
+        plt.figure(figsize=(10, 6))
+        plt.title("Test Accuracy over Epochs for Parameter Sweep")
+        plt.xlabel("Epoch")
+        plt.ylabel("Accuracy")
+        plt.ylim((0, 1))
+    
+        for res in results:
+            label = f"A={res['anchorNodes']}, W={res['numWalks']}"
+            plt.plot(np.arange(num_epochs, step=test_interval), res['test_accuracy'], label=label)
+    
+        plt.legend()
+        plt.show()
