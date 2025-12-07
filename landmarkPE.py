@@ -662,11 +662,15 @@ print(x[1])
 # %%
 
 print("Creating model")
-model = GraphTransformer(
-    in_dim=in_channels,
-    d_model=128,
-    nhead=4,
-    num_layers=2
+model = Network(
+    in_channels=in_channels,
+    hidden_channels=hidden_channels,
+    out_channels=out_channels,
+    task_level=task_level,
+    # in_dim=in_channels,
+    # d_model=128,
+    # nhead=4,
+    # num_layers=2
 )
 # model = ConciseTransformer(
 #     d_model=in_channels,
@@ -718,37 +722,37 @@ for epoch_i in range(1, num_epochs + 1):
     opt.zero_grad()
 
     # Extract edge_index from sparse incidence matrix
-    y_hat = model(x)
-    loss = loss_fn(y_hat[0][train_mask], y[train_mask])
+    y_hat = model(x, incidence_1)
+    loss = loss_fn(y_hat[train_mask], y[train_mask])
 
     loss.backward()
     opt.step()
     epoch_loss.append(loss.item())
-    train_accuracy.append(acc_fn(y_hat[0][train_mask], y[train_mask]).item())
+    train_accuracy.append(acc_fn(y_hat[train_mask], y[train_mask]).item())
 
     if epoch_i % test_interval == 0:
         model.eval()
 
-        y_hat = model(x)
-        loss = loss_fn(y_hat[0][train_mask], y[train_mask])
+        y_hat = model(x, incidence_1)
+        loss = loss_fn(y_hat[train_mask], y[train_mask])
 
         print(f"Epoch: {epoch_i} ")
         print(
-            f"Train_loss: {np.mean(epoch_loss):.4f}, acc: {acc_fn(y_hat[0][train_mask], y[train_mask]):.4f}",
+            f"Train_loss: {np.mean(epoch_loss):.4f}, acc: {acc_fn(y_hat[train_mask], y[train_mask]):.4f}",
             flush=True,
         )
-        test_accuracy.append(acc_fn(y_hat[0][test_mask], y[test_mask]))
+        test_accuracy.append(acc_fn(y_hat[test_mask], y[test_mask]))
 
-        loss = loss_fn(y_hat[0][test_mask], y[test_mask])
+        loss = loss_fn(y_hat[test_mask], y[test_mask])
         print(
-            f"Test_loss: {loss:.4f}, Test_acc: {acc_fn(y_hat[0][test_mask], y[test_mask]):.4f}",
+            f"Test_loss: {loss:.4f}, Test_acc: {acc_fn(y_hat[test_mask], y[test_mask]):.4f}",
             flush=True,
         )
 
 print(f"Total took {time.perf_counter() - begin} seconds.")
 model.eval()
-y_hat = model(x)
-y_hat = y_hat[0].argmax(dim=1).cpu().numpy()
+y_hat = model(x, incidence_1)
+y_hat = y_hat.argmax(dim=1).cpu().numpy()
 cm = sklearn.metrics.confusion_matrix(y.cpu(),y_hat)
 # confusion_matrixes.append(cm)
 
