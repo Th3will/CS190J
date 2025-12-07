@@ -67,10 +67,11 @@ if dataset == "walmart":
     df_triptype_labels = list(map(int, df_triptype_labels))
 
     # y = torch.Tensor(df_triptype_labels)
-    y = [i - 1 for i in df_triptype_labels]
+    y = [i if i != 999 else 44 for i in df_triptype_labels]
+    y_indicies = torch.LongTensor(y)
 
-    numClasses = np.max(y) + 1
-    oneHotY = np.zeros((len(y), numClasses))
+    numCategories = np.max(y) + 1
+    oneHotY = np.zeros((len(y), numCategories))
     oneHotY[np.arange(len(y)), y] = 1
 
     y = oneHotY
@@ -211,9 +212,9 @@ def arnoldi_encoding(hypergraph : xgi.Hypergraph, k : int, smallestOnly = True):
     kLargest = torch.from_numpy(np.zeros((hypergraph.num_nodes,0)))
     if not smallestOnly:
         k = k//2
-        kLargest = torch.from_numpy(np.real(scipy.sparse.linalg.lobpcg(laplacian, DETERMINISM_EIGS_L, largest=True, tol=1e-2)[1]))
+        kLargest = torch.from_numpy(np.real(scipy.sparse.linalg.lobpcg(laplacian, largest=True, tol=1e-2)[1]))
         
-    kSmallest = torch.from_numpy(np.real(scipy.sparse.linalg.lobpcg(laplacian, DETERMINISM_EIGS_S, largest=False, tol=1e-2)[1]))
+    kSmallest = torch.from_numpy(np.real(scipy.sparse.linalg.lobpcg(laplacian, X=DETERMINISM_EIGS_S, largest=False, tol=1e-2)[1]))
 
 
     return torch.cat((kLargest, kSmallest), axis=1).to_sparse()
@@ -357,7 +358,7 @@ if use_random_walk_pe:
 x, incidence_1, y = (
     x_0s.to_dense().float().to(device),
     incidence_1.to_sparse().float().to(device),
-    y.to(device),
+    y_indicies.to(device),
 )
 
 
@@ -372,20 +373,20 @@ mlp_num_layers = 2
 # TODO: BEWAREEEEEE
 task_level = "edge" #"graph" if out_channels == 1 else "node"
 
-out_channels = y.shape[1]
+out_channels = numCategories
 
 
 # %%
 
 print("Creating model")
 
-model = SNetwork(
+model = Network(
     in_channels=in_channels,
     hidden_channels=hidden_channels,
     out_channels=out_channels,
-    n_layers=n_layers
-    # mlp_num_layers=mlp_num_layers,
-    # task_level=task_level,
+    n_layers=n_layers,
+    mlp_num_layers=mlp_num_layers,
+    task_level=task_level,
 ).to(device)
 
 # Optimizer and loss
@@ -396,8 +397,8 @@ loss_fn = torch.nn.CrossEntropyLoss()
 
 
 # Accuracy
-def acc_fn(y, y_hat):
-    return (y.argmax(dim=1) == y_hat.argmax(dim=1)).float().mean()
+def acc_fn(y_hat, y):
+    return (y == y_hat.argmax(dim=1)).float().mean()
 
 
 # %%
@@ -451,7 +452,7 @@ print(f"Total took {time.perf_counter() - begin} seconds.")
 model.eval()
 y_hat = model(x, incidence_1)
 y_hat = y_hat.argmax(dim=1).cpu().numpy()
-cm = sklearn.metrics.confusion_matrix(y.argmax(dim=1).cpu(),y_hat)
+cm = sklearn.metrics.confusion_matrix(y.cpu(),y_hat)
 # confusion_matrixes.append(cm)
 
 # %%
