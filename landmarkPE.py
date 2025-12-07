@@ -55,7 +55,7 @@ def coo2Sparse(coo) -> torch.Tensor:
     v = torch.FloatTensor(values)
     return torch.sparse_coo_tensor(i, v, torch.Size(shape))
 
-dataset = "zoo"
+dataset = "cora"
 
 if dataset == "cora":
     # from AllSet loading
@@ -66,7 +66,7 @@ if dataset == "cora":
         # first load node features:
         with open(coraPath + 'features.pickle', 'rb') as f:
             features = pickle.load(f)
-            features = features.todense()[:, :0]
+            features = features.todense()
 
         with open(coraPath + 'labels.pickle', 'rb') as f:
             labels = pickle.load(f)
