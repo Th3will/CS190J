@@ -30,7 +30,7 @@ import sys
 
 import time
 
-seed = 0
+seed = 200
 
 random.seed(seed)
 np.random.seed(seed)
@@ -176,19 +176,42 @@ def anchor_positional_encoding(hypergraph: xgi.Hypergraph, anchor_nodes, iterati
     #     ary.append(temp)
     # anchor_node = np.array(ary).T  # shape: num_nodes x num_anchors
 
-    indicies = torch.stack([torch.as_tensor(anchor_nodes), torch.arange(len(anchor_nodes))])
-    values = torch.ones(len(anchor_nodes))
-
-    anchor_node = torch.sparse_coo_tensor(
-        indicies, 
-        values, 
-        size=(transition_mat.shape[0], len(anchor_nodes))
-    )
+    transition_mat = transition_mat.to(device)
     
-    # perform random walk for specified iterations
-    for _ in range(iterations):
-        anchor_node = transition_mat @ anchor_node
-
+    results = []
+    import math
+    batch_size = 256  # Reduced batch size and using dense matrix for stability
+    
+    for i in range(0, len(anchor_nodes), batch_size):
+        batch_anchors = anchor_nodes[i:i + batch_size]
+        
+        # Create sparse anchor matrix for this batch then convert to dense
+        batch_indices = torch.stack([
+            torch.as_tensor(batch_anchors), 
+            torch.arange(len(batch_anchors))
+        ])
+        batch_values = torch.ones(len(batch_anchors))
+        
+        # Create dense batch matrix (N x B)
+        # Sparse @ Dense is efficient on GPU
+        batch_matrix = torch.sparse_coo_tensor(
+            batch_indices, 
+            batch_values, 
+            size=(transition_mat.shape[0], len(batch_anchors))
+        ).to_dense().to(device)
+        
+        # Perform random walk
+        for _ in range(iterations):
+            batch_matrix = transition_mat @ batch_matrix
+            
+        results.append(batch_matrix.cpu())
+        
+    # Concatenate all batches
+    if len(results) > 0:
+        anchor_node = torch.cat(results, dim=1)
+    else:
+        anchor_node = torch.zeros(incidence_matrix.shape[0], 0)
+    
     return anchor_node
 
 #%%
@@ -320,6 +343,8 @@ numWalks = 3
 def add_positional_encoding(H, x_0s, incidence_1, use_arnoldis, eigenvectors, use_random_walk_pe, anchorNodes, numWalks):
     if use_arnoldis:
         arnoldis = arnoldi_encoding(hypergraph=H, k=eigenvectors)
+        if x_0s.is_sparse: x_0s = x_0s.to_dense()
+        if arnoldis.is_sparse: arnoldis = arnoldis.to_dense()
         x_0s = torch.cat([x_0s, arnoldis], axis=1)
 
     if use_random_walk_pe:
@@ -328,6 +353,8 @@ def add_positional_encoding(H, x_0s, incidence_1, use_arnoldis, eigenvectors, us
             anchor_nodes=random.sample(range(incidence_1.shape[0]), k=anchorNodes),
             iterations=numWalks
         )
+        if x_0s.is_sparse: x_0s = x_0s.to_dense()
+        if rw_pe.is_sparse: rw_pe = rw_pe.to_dense()
         x_0s = torch.cat([x_0s, rw_pe], dim=1)
     
     return x_0s
@@ -446,15 +473,6 @@ if __name__ == "__main__":
     
     results = []
 
-    print(f"Running Baseline")
-
-    x_0s = x_0s_base.clone()
-    
-    model, train_accuracy, test_accuracy, cm = train_model(x_0s, incidence_1, y, df, num_epochs=num_epochs, test_interval=test_interval)
-    
-    final_test_acc = test_accuracy[-1].cpu().item()
-    print(f"Baseline Final Test Acc: {final_test_acc:.4f}")
-
     if len(sys.argv) > 1:
         i = 1
         while i < len(sys.argv):
@@ -482,6 +500,14 @@ if __name__ == "__main__":
     
         model, train_accuracy, test_accuracy, cm = train_model(x_0s, incidence_1, y, df, num_epochs=num_epochs, test_interval=test_interval)
     else:
+        print(f"Running Baseline")
+
+        x_0s = x_0s_base.clone()
+        
+        model, train_accuracy, test_accuracy, cm = train_model(x_0s, incidence_1, y, df, num_epochs=num_epochs, test_interval=test_interval)
+        
+        final_test_acc = test_accuracy[-1].cpu().item()
+        print(f"Baseline Final Test Acc: {final_test_acc:.4f}")
         for anchorNodes in anchor_nodes_list:
             for numWalks in num_walks_list:
                 print(f"Running with anchorNodes={anchorNodes}, numWalks={numWalks}")
@@ -501,10 +527,11 @@ if __name__ == "__main__":
                     "final_test_acc": final_test_acc,
                     "test_accuracy": [x.cpu().item() for x in test_accuracy]
                 })
-
+        print(f"seed = {seed}")
         print("\n--- Parameter Sweep Results ---")
         for res in results:
             print(f"Anchors: {res['anchorNodes']}, Walks: {res['numWalks']}, Final Test Acc: {res['final_test_acc']:.4f}")
+        print("---")
 
         from matplotlib import pyplot as plt
         plt.figure(figsize=(10, 6))
