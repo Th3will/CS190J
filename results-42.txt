@@ -1,0 +1,71 @@
+Running Baseline
+Baseline Final Test Acc: 0.4929
+Running with anchorNodes=10, numWalks=1
+Adding encodings...
+Anchors: 10, Walks: 1, Final Test Acc: 0.5027
+Running with anchorNodes=10, numWalks=3
+Adding encodings...
+Anchors: 10, Walks: 3, Final Test Acc: 0.4970
+Running with anchorNodes=10, numWalks=5
+Adding encodings...
+Anchors: 10, Walks: 5, Final Test Acc: 0.5024
+Running with anchorNodes=10, numWalks=10
+Adding encodings...
+Anchors: 10, Walks: 10, Final Test Acc: 0.4965
+Running with anchorNodes=100, numWalks=1
+Adding encodings...
+Anchors: 100, Walks: 1, Final Test Acc: 0.5024
+Running with anchorNodes=100, numWalks=3
+Adding encodings...
+Anchors: 100, Walks: 3, Final Test Acc: 0.5054
+Running with anchorNodes=100, numWalks=5
+Adding encodings...
+Anchors: 100, Walks: 5, Final Test Acc: 0.5134
+Running with anchorNodes=100, numWalks=10
+Adding encodings...
+Anchors: 100, Walks: 10, Final Test Acc: 0.5006
+Running with anchorNodes=1000, numWalks=1
+Adding encodings...
+Anchors: 1000, Walks: 1, Final Test Acc: 0.5119
+Running with anchorNodes=1000, numWalks=3
+Adding encodings...
+Anchors: 1000, Walks: 3, Final Test Acc: 0.5031
+Running with anchorNodes=1000, numWalks=5
+Adding encodings...
+Anchors: 1000, Walks: 5, Final Test Acc: 0.5111
+Running with anchorNodes=1000, numWalks=10
+Adding encodings...
+Anchors: 1000, Walks: 10, Final Test Acc: 0.5084
+Running with anchorNodes=10000, numWalks=1
+Adding encodings...
+Anchors: 10000, Walks: 1, Final Test Acc: 0.5283
+Running with anchorNodes=10000, numWalks=3
+Adding encodings...
+Anchors: 10000, Walks: 3, Final Test Acc: 0.5235
+Running with anchorNodes=10000, numWalks=5
+Adding encodings...
+Anchors: 10000, Walks: 5, Final Test Acc: 0.5277
+Running with anchorNodes=10000, numWalks=10
+Adding encodings...
+Anchors: 10000, Walks: 10, Final Test Acc: 0.5260
+
+seed = 42
+--- Parameter Sweep Results ---
+Baseline Final Test Acc: 0.4929
+Anchors: 10, Walks: 1, Final Test Acc: 0.5027
+Anchors: 10, Walks: 3, Final Test Acc: 0.4970
+Anchors: 10, Walks: 5, Final Test Acc: 0.5024
+Anchors: 10, Walks: 10, Final Test Acc: 0.4965
+Anchors: 100, Walks: 1, Final Test Acc: 0.5024
+Anchors: 100, Walks: 3, Final Test Acc: 0.5054
+Anchors: 100, Walks: 5, Final Test Acc: 0.5134
+Anchors: 100, Walks: 10, Final Test Acc: 0.5006
+Anchors: 1000, Walks: 1, Final Test Acc: 0.5119
+Anchors: 1000, Walks: 3, Final Test Acc: 0.5031
+Anchors: 1000, Walks: 5, Final Test Acc: 0.5111
+Anchors: 1000, Walks: 10, Final Test Acc: 0.5084
+Anchors: 10000, Walks: 1, Final Test Acc: 0.5283
+Anchors: 10000, Walks: 3, Final Test Acc: 0.5235
+Anchors: 10000, Walks: 5, Final Test Acc: 0.5277
+Anchors: 10000, Walks: 10, Final Test Acc: 0.5260
+---

@@ -1,0 +1,72 @@
+Running Baseline
+Total took 19.08950599000127 seconds.
+Baseline Final Test Acc: 0.4985
+Running with anchorNodes=10, numWalks=1
+Total took 18.75855514400064 seconds.
+Anchors: 10, Walks: 1, Final Test Acc: 0.5163
+Running with anchorNodes=10, numWalks=3
+Total took 18.86590689700097 seconds.
+Anchors: 10, Walks: 3, Final Test Acc: 0.5078
+Running with anchorNodes=10, numWalks=5
+Total took 18.784325745000388 seconds.
+Anchors: 10, Walks: 5, Final Test Acc: 0.5023
+Running with anchorNodes=10, numWalks=10
+Total took 19.069087146999664 seconds.
+Anchors: 10, Walks: 10, Final Test Acc: 0.5024
+Running with anchorNodes=100, numWalks=1
+Total took 19.12226840099902 seconds.
+Anchors: 100, Walks: 1, Final Test Acc: 0.5159
+Running with anchorNodes=100, numWalks=3
+Total took 19.145530483001494 seconds.
+Anchors: 100, Walks: 3, Final Test Acc: 0.5119
+Running with anchorNodes=100, numWalks=5
+Total took 19.105007812000622 seconds.
+Anchors: 100, Walks: 5, Final Test Acc: 0.4966
+Running with anchorNodes=100, numWalks=10
+Total took 19.14208217399937 seconds.
+Anchors: 100, Walks: 10, Final Test Acc: 0.4986
+Running with anchorNodes=1000, numWalks=1
+Total took 22.67202121000082 seconds.
+Anchors: 1000, Walks: 1, Final Test Acc: 0.5310
+Running with anchorNodes=1000, numWalks=3
+Total took 22.729111301998273 seconds.
+Anchors: 1000, Walks: 3, Final Test Acc: 0.5142
+Running with anchorNodes=1000, numWalks=5
+Total took 22.69629988500128 seconds.
+Anchors: 1000, Walks: 5, Final Test Acc: 0.5134
+Running with anchorNodes=1000, numWalks=10
+Total took 22.653798160001315 seconds.
+Anchors: 1000, Walks: 10, Final Test Acc: 0.5143
+Running with anchorNodes=10000, numWalks=1
+Total took 60.140235341001244 seconds.
+Anchors: 10000, Walks: 1, Final Test Acc: 0.5441
+Running with anchorNodes=10000, numWalks=3
+Total took 60.225408476000666 seconds.
+Anchors: 10000, Walks: 3, Final Test Acc: 0.5250
+Running with anchorNodes=10000, numWalks=5
+Total took 60.35766647999844 seconds.
+Anchors: 10000, Walks: 5, Final Test Acc: 0.5129
+Running with anchorNodes=10000, numWalks=10
+Total took 60.23393516999931 seconds.
+Anchors: 10000, Walks: 10, Final Test Acc: 0.5259
+
+seed = 50
+--- Parameter Sweep Results ---
+Baseline Final Test Acc: 0.4985
+Anchors: 10, Walks: 1, Final Test Acc: 0.5163
+Anchors: 10, Walks: 3, Final Test Acc: 0.5078
+Anchors: 10, Walks: 5, Final Test Acc: 0.5023
+Anchors: 10, Walks: 10, Final Test Acc: 0.5024
+Anchors: 100, Walks: 1, Final Test Acc: 0.5159
+Anchors: 100, Walks: 3, Final Test Acc: 0.5119
+Anchors: 100, Walks: 5, Final Test Acc: 0.4966
+Anchors: 100, Walks: 10, Final Test Acc: 0.4986
+Anchors: 1000, Walks: 1, Final Test Acc: 0.5310
+Anchors: 1000, Walks: 3, Final Test Acc: 0.5142
+Anchors: 1000, Walks: 5, Final Test Acc: 0.5134
+Anchors: 1000, Walks: 10, Final Test Acc: 0.5143
+Anchors: 10000, Walks: 1, Final Test Acc: 0.5441
+Anchors: 10000, Walks: 3, Final Test Acc: 0.5250
+Anchors: 10000, Walks: 5, Final Test Acc: 0.5129
+Anchors: 10000, Walks: 10, Final Test Acc: 0.5259
+---
