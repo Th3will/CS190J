@@ -28,10 +28,13 @@ from sklearn.utils.extmath import randomized_svd
 
 import pickle
 import os.path as osp
+import copy
 
 import sys
 
 import time
+import uuid
+import json
 
 random.seed(42)
 np.random.seed(42)
@@ -55,7 +58,7 @@ def coo2Sparse(coo) -> torch.Tensor:
     v = torch.FloatTensor(values)
     return torch.sparse_coo_tensor(i, v, torch.Size(shape))
 
-dataset = "cora"
+dataset = "walmart"
 
 if dataset == "cora":
     # from AllSet loading
@@ -199,8 +202,58 @@ elif dataset == "zoo":
     # incidence_1 = coo_array(np.array(df_nodes))
 
 
-
 #%%
+def compute_hyperedges_medoids(hypergraph: xgi.Hypergraph, node_features: torch.Tensor, top_k: int = 1):
+    medoids = []
+    
+    if isinstance(node_features, torch.Tensor):
+        features = node_features.cpu().numpy() if node_features.is_cuda else node_features.numpy()
+    else:
+        features = node_features
+    
+    # Create mapping from xgi node IDs to feature indices
+    node_list = sorted(list(hypergraph.nodes))
+    node_to_idx = {node: idx for idx, node in enumerate(node_list)}
+    
+    # Iterate through hyperedges
+    for edge_id in hypergraph.edges:
+        edge_nodes = hypergraph.edges.members(edge_id)
+        if len(edge_nodes) == 0:
+            continue
+        
+        # Convert edge nodes to indices
+        edge_node_indices = [node_to_idx[node] for node in edge_nodes if node in node_to_idx]
+        
+        if len(edge_node_indices) == 0:
+            continue
+        
+        # Get features for nodes in hyperedge
+        edge_features = features[edge_node_indices]
+        
+        # Compute pairwise distances for nodes in hyperedge
+        distances = []
+        for i, feat_i in enumerate(edge_features):
+            dist_sum = np.sum(np.linalg.norm(edge_features - feat_i, axis=1))
+            distances.append((dist_sum, edge_node_indices[i]))
+        
+        # Sort by distance then node index
+        distances.sort(key=lambda x: (x[0], x[1]))
+        
+        # Get top-k medoids for hyperedge
+        for i in range(min(top_k, len(distances))):
+            medoid_idx = distances[i][1]
+            medoids.append(medoid_idx)
+    
+    # Remove duplicates
+    seen = set()
+    unique_medoids = []
+    for medoid in medoids:
+        if medoid not in seen:
+            seen.add(medoid)
+            unique_medoids.append(medoid)
+    
+    return unique_medoids
+
 def hypergraph_random_walk(incidence_matrix):
     C = incidence_matrix.T @ incidence_matrix # hyper-edge "adjacency" matrix
     # C_hat is defined by just the diagonal of C
@@ -269,267 +322,7 @@ def arnoldi_encoding(hypergraph : xgi.Hypergraph, k : int, smallestOnly = True):
     kSmallest = torch.from_numpy(np.real(scipy.sparse.linalg.lobpcg(laplacian, DETERMINISM_EIGS_S, largest=False, tol=1e-4)[1]))
 
     return torch.cat((kLargest, kSmallest), axis=1).to_sparse()
-
-# %% Actual ML stuff
-# Where do we go from here?
-# 1. Need to perform a baseline hypergraph transformer without positional encoding
-    # I don't know how to input variable sized data into a transformer
-
-class LinearSelfAttention(nn.Module):
-    def __init__(self, dim, heads=4, dropout=0.1):
-        super().__init__()
-        assert dim % heads == 0, "Hidden dimension must be divisible by heads."
-        
-        self.heads = heads
-        self.head_dim = dim // heads
-        self.scale = self.head_dim ** -0.5
-        
-        # Q, K, V projections
-        self.to_qkv = nn.Linear(dim, dim * 3, bias=False)
-        
-        self.to_out = nn.Sequential(
-            nn.Linear(dim, dim),
-            nn.Dropout(dropout)
-        )
-
-    def forward(self, x):
-        # x shape: (Batch, N, Dim)
-        b, n, d = x.shape
-        h = self.heads
-        
-        # 1. Project Q, K, V
-        qkv = self.to_qkv(x).chunk(3, dim=-1)
-        q, k, v = map(lambda t: t.reshape(b, n, h, -1).transpose(1, 2), qkv)
-        # Shapes are now (Batch, Heads, N, Head_Dim)
-
-        # 2. Apply Feature Map (The "Kernel Trick")
-        # ELU + 1 is a common approximation for Softmax that keeps values positive
-        q = F.elu(q) + 1
-        k = F.elu(k) + 1
-
-        # 3. Linear Attention Computation
-        # Standard: softmax(Q @ K.T) @ V  -> Complexity O(N^2)
-        # Linear:   Q @ (K.T @ V)         -> Complexity O(N)
-        
-        # kv = (K.T @ V). We sum over N here.
-        # Shape: (Batch, Heads, Head_Dim, Head_Dim)
-        kv = torch.einsum('bhnd,bhne->bhde', k, v)
-        
-        # z = 1 / (Q @ K.sum(dim=1)) - Normalization factor
-        z = 1 / (torch.einsum('bhnd,bhd->bhn', q, k.sum(dim=2)) + 1e-6)
-        
-        # out = (Q @ kv) * z
-        out = torch.einsum('bhnd,bhde->bhne', q, kv) * z.unsqueeze(-1)
-        
-        # 4. Reshape back
-        out = out.transpose(1, 2).reshape(b, n, d)
-        return self.to_out(out)
-
-class LinearTransformerBlock(nn.Module):
-    """
-    Replaces a standard TransformerEncoderLayer but uses Linear Attention
-    """
-    def __init__(self, dim, heads, dropout=0.1, mlp_dim=None):
-        super().__init__()
-        mlp_dim = mlp_dim or dim * 4
-        
-        self.norm1 = nn.LayerNorm(dim)
-        self.attn = LinearSelfAttention(dim, heads=heads, dropout=dropout)
-        
-        self.norm2 = nn.LayerNorm(dim)
-        self.mlp = nn.Sequential(
-            nn.Linear(dim, mlp_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(mlp_dim, dim),
-            nn.Dropout(dropout)
-        )
-
-    def forward(self, x):
-        # Residual connections are handled here
-        x = x + self.attn(self.norm1(x))
-        x = x + self.mlp(self.norm2(x))
-        return x
-
-class STransformer2(nn.Module):
-    def __init__(self, in_channels, hidden_channels, out_channels, n_layers, nhead=4):
-        super().__init__()
-        
-        self.embedding = nn.Linear(in_channels, hidden_channels)
-        
-        # REPLACED: Standard Transformer -> Stack of Linear Blocks
-        self.layers = nn.ModuleList([
-            LinearTransformerBlock(dim=hidden_channels, heads=nhead)
-            for _ in range(n_layers)
-        ])
-        
-        self.fc_out = nn.Linear(hidden_channels, out_channels)
-
-    def forward(self, x, incidence_1):
-        # x input: (N, In_Channels)
-        
-        x = self.embedding(x) # (N, Hidden)
-        
-        # Unsqueeze batch dim: (1, N, Hidden)
-        x = x.unsqueeze(0) 
-        
-        # Apply Linear Transformer Layers
-        for layer in self.layers:
-            x = layer(x)
-            
-        x = x.squeeze(0) # Back to (N, Hidden)
-
-        # Message Passing (Node -> Hyperedge aggregation)
-        # hyperedge_degrees = torch.sparse.sum(incidence_1, dim=0).to_dense()
-        # hyperedge_degrees = hyperedge_degrees.clamp(min=1).unsqueeze(1) 
-
-        # x = torch.mm(incidence_1.t(), x) # WALMART
-        # x = x / hyperedge_degrees 
-
-        return self.fc_out(x)
-
-class GraphTransformer(nn.Module):
-    def __init__(self, in_dim, d_model, nhead, num_layers, dim_feedforward=512, dropout=0.1):
-        """
-        Args:
-            in_dim: Original feature dimension (e.g., 1433).
-            d_model: Internal dimension for the transformer (must be divisible by nhead).
-            nhead: Number of attention heads.
-            num_layers: Number of transformer encoder layers.
-        """
-        super().__init__()
-        
-        # 1. Projection: Map irregular input dims (like 1433) to d_model
-        self.project_in = nn.Linear(in_dim, d_model)
-        
-        # 2. Transformer Encoder
-        # batch_first=True expects input: (Batch_Size, Seq_Len/Nodes, Features)
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=d_model, 
-            nhead=nhead, 
-            dim_feedforward=dim_feedforward, 
-            dropout=dropout, 
-            batch_first=True
-        )
-        self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
-        
-        # 3. Output Projection (Optional: project back to class logits or keep as embeddings)
-        # self.project_out = nn.Linear(d_model, num_classes) # Uncomment if needed
-
-    def forward(self, x, mask=None, src_key_padding_mask=None):
-        """
-        x: Input tensor of shape (Batch, Nodes, in_dim) or (Nodes, in_dim)
-        mask: Optional mask for self-attention (e.g., adjacency constraints)
-        src_key_padding_mask: Optional mask for ignoring padding nodes in batch
-        """
-        # Ensure batch dimension exists
-        if x.dim() == 2:
-            x = x.unsqueeze(0) # (1, Nodes, Features)
-
-        # Project features
-        x = self.project_in(x)
-        
-        # Apply Transformer
-        # Output shape: (Batch, Nodes, d_model)
-        out = self.transformer_encoder(x, mask=mask, src_key_padding_mask=src_key_padding_mask)
-        
-        return out
-
-class ConciseTransformer(nn.Module):
-    def __init__(
-        self, 
-        d_model: int, 
-        nhead: int, 
-        num_encoder_layers: int, 
-        num_decoder_layers: int, 
-        output_dim: int, 
-        dim_feedforward: int = 2048, 
-        dropout: float = 0.1
-    ):
-        """
-        Args:
-            d_model: The number of expected features in the encoder/decoder inputs (embedding size).
-            nhead: The number of heads in the multiheadattention models.
-            num_encoder_layers: The number of sub-encoder-layers in the encoder.
-            num_decoder_layers: The number of sub-decoder-layers in the decoder.
-            output_dim: The dimension of the final output (e.g., vocab size).
-        """
-        super().__init__()
-        
-        # Native PyTorch Transformer. 
-        # Note: This module does NOT add positional encodings, satisfying your constraint.
-        self.transformer = nn.Transformer(
-            d_model=d_model,
-            nhead=nhead,
-            num_encoder_layers=num_encoder_layers,
-            num_decoder_layers=num_decoder_layers,
-            dim_feedforward=dim_feedforward,
-            dropout=dropout,
-            batch_first=True # Expects (batch, seq_len, features)
-        )
-        
-        # Final projection layer to map back to vocabulary/output size
-        self.fc_out = nn.Linear(d_model, output_dim)
-
-    def generate_square_subsequent_mask(self, sz: int) -> torch.Tensor:
-        """Generates an upper-triangular matrix of -inf, with zeros on diag."""
-        return torch.triu(torch.full((sz, sz), float('-inf')), diagonal=1)
-
-    def forward(
-        self, 
-        src: torch.Tensor, 
-        tgt: torch.Tensor, 
-        src_mask: torch.Tensor = None, 
-        tgt_mask: torch.Tensor = None,
-        src_padding_mask: torch.Tensor = None, 
-        tgt_padding_mask: torch.Tensor = None
-    ):
-        """
-        Args:
-            src: Source sequence (Batch, Seq_Len, d_model) - Includes Positional Encoding
-            tgt: Target sequence (Batch, Seq_Len, d_model) - Includes Positional Encoding
-            tgt_mask: Causal mask for decoder (usually required)
-            padding_masks: Boolean masks where True indicates padding to be ignored.
-        """
-        
-        # Pass through the main Transformer (Encoder + Decoder)
-        out = self.transformer(
-            src=src,
-            tgt=tgt,
-            src_mask=src_mask,
-            tgt_mask=tgt_mask,
-            src_key_padding_mask=src_padding_mask,
-            tgt_key_padding_mask=tgt_padding_mask
-        )
-        
-        # Project to output dimension
-        return self.fc_out(out)
     
-class MLP(nn.Module):
-    def __init__(self, in_channels, hidden_channels, out_channels, n_layers):
-        super().__init__()
-        layers = []
-        
-        # Handle the single layer case specifically
-        if n_layers == 1:
-            layers.append(nn.Linear(in_channels, out_channels))
-        else:
-            # Input layer
-            layers.append(nn.Linear(in_channels, hidden_channels))
-            layers.append(nn.ReLU())
-            
-            # Hidden layers
-            for _ in range(n_layers - 2):
-                layers.append(nn.Linear(hidden_channels, hidden_channels))
-                layers.append(nn.ReLU())
-            
-            # Output layer
-            layers.append(nn.Linear(hidden_channels, out_channels))
-            
-        self.net = nn.Sequential(*layers)
-
-    def forward(self, x, incidence):
-        return self.net(x)
     
 class Network(torch.nn.Module):
     """Network class that initializes the AllSet model and readout layer.
@@ -594,8 +387,11 @@ use_random_walk_pe = False
 anchorNodes = 0
 numWalks = 0
 
+# Model saving parameters
+save_model = False
+model_output_dir = None
 
-num_epochs = 1000
+num_epochs = 200
 
 if len(sys.argv) > 1:
     i = 1
@@ -614,24 +410,47 @@ if len(sys.argv) > 1:
         elif sys.argv[i].startswith("-e"):
             i += 1
             num_epochs = int(sys.argv[i])
+        elif sys.argv[i].startswith("-o"):
+            save_model = True
+            i += 1
+            model_output_dir = sys.argv[i] if i < len(sys.argv) else "."
         i += 1
 
 # %%
 ## add encodings
 print("Adding encodings...")
 
+# Convert to dense for concatenation if sparse
+x_0s = x_0s.to_dense() if x_0s.is_sparse else x_0s
 x = x_0s
+
 if use_arnoldis:
     arnoldis = arnoldi_encoding(hypergraph=H, k=eigenvectors)
-    x_0s = torch.cat([x_0s, arnoldis.to_dense()], dim=1)
+    arnoldis_dense = arnoldis.to_dense() if arnoldis.is_sparse else arnoldis
+    x_0s = torch.cat([x_0s, arnoldis_dense], dim=1)
 
 if use_random_walk_pe:
+    # Compute hyperedge medoids to use as anchor nodes
+    print(f"Computing hyperedge medoids for anchor node selection...")
+    all_medoids = compute_hyperedges_medoids(hypergraph=H, node_features=x_0s, top_k=1)
+    print(f"Found {len(all_medoids)} unique medoids from {len(H.edges)} hyperedges")
+    
+    # Select anchorNodes medoids (deterministic: take first anchorNodes)
+    if len(all_medoids) >= anchorNodes:
+        selected_medoids = all_medoids[:anchorNodes]
+    else:
+        # If we have fewer medoids than requested, use all of them
+        selected_medoids = all_medoids
+        print(f"Warning: Only {len(selected_medoids)} medoids available, using all of them instead of {anchorNodes}")
+    
+    print(f"Using {len(selected_medoids)} medoids as anchor nodes for random walk")
     rw_pe = anchor_positional_encoding(
         hypergraph=H,
-        anchor_nodes=random.sample(range(incidence_1.shape[0]), k=anchorNodes),
+        anchor_nodes=selected_medoids,
         iterations=numWalks
     )
-    x_0s = torch.cat([x_0s, rw_pe.to_dense()], dim=1)
+    rw_pe_dense = rw_pe.to_dense() if rw_pe.is_sparse else rw_pe
+    x_0s = torch.cat([x_0s, rw_pe_dense], dim=1)
 
 # x_0s = torch.reshape(x_0s, (1, -1))
 # %% 
@@ -652,7 +471,7 @@ n_layers = 1
 mlp_num_layers = 2
 
 # TODO: BEWAREEEEEE
-task_level = "node" #"graph" if out_channels == 1 else "node"
+task_level = "edge" if dataset == "walmart" else "node"
 
 # out_channels = numClasses # WALMART
 out_channels = (max(y_indices) + 1) # * H.num_nodes
@@ -662,27 +481,12 @@ print(x[1])
 # %%
 
 print("Creating model")
-model = GraphTransformer(
-    in_dim=in_channels,
-    d_model=128,
-    nhead=4,
-    num_layers=2
-)
-# model = ConciseTransformer(
-#     d_model=in_channels,
-#     nhead=1,
-#     num_encoder_layers=2,
-#     num_decoder_layers=0,
-#     output_dim=out_channels
-# )
-# model = STransformer2(
-#     in_channels=in_channels,
-#     hidden_channels=hidden_channels,
-#     out_channels=out_channels,
-#     n_layers=n_layers
-#     # mlp_num_layers=mlp_num_layers,
-#     # task_level=task_level,
-# ).to(device)
+model = Network(
+    in_channels=in_channels,
+    hidden_channels=hidden_channels,
+    out_channels=out_channels,
+    task_level=task_level
+).to(device)
 
 # Optimizer and loss
 opt = torch.optim.Adam(model.parameters(), lr=0.001)
@@ -699,8 +503,12 @@ def acc_fn(y_hat, y):
 # %%
 # create masking for training
 TRAIN_TEST_SPLIT_RATIO = 0.8
-# outsize = len(df) # WALMART
-outsize = H.num_nodes
+# For walmart, labels are per hyperedge (edge-level task)
+# For cora/zoo, labels are per node (node-level task)
+if dataset == "walmart":
+    outsize = len(y_indices)  # Number of hyperedges
+else:
+    outsize = H.num_nodes  # Number of nodes
 trainSize = int(outsize*TRAIN_TEST_SPLIT_RATIO)
 train_mask = [True]*int(trainSize) + [False]*int(outsize-trainSize)
 random.shuffle(train_mask)
@@ -710,6 +518,10 @@ test_interval = 1
 epoch_loss = []
 train_accuracy = []
 test_accuracy = []
+best_test_acc = 0.0
+best_test_acc_epoch = 0
+best_test_acc_epoch200 = 0.0
+best_model_state = None
 print("Starting training")
 begin = time.perf_counter()
 for epoch_i in range(1, num_epochs + 1):
@@ -718,37 +530,51 @@ for epoch_i in range(1, num_epochs + 1):
     opt.zero_grad()
 
     # Extract edge_index from sparse incidence matrix
-    y_hat = model(x)
-    loss = loss_fn(y_hat[0][train_mask], y[train_mask])
+    y_hat = model(x, incidence_1)
+    loss = loss_fn(y_hat[train_mask], y[train_mask])
 
     loss.backward()
     opt.step()
     epoch_loss.append(loss.item())
-    train_accuracy.append(acc_fn(y_hat[0][train_mask], y[train_mask]).item())
+    train_accuracy.append(acc_fn(y_hat[train_mask], y[train_mask]).item())
 
     if epoch_i % test_interval == 0:
         model.eval()
 
-        y_hat = model(x)
-        loss = loss_fn(y_hat[0][train_mask], y[train_mask])
+        y_hat = model(x, incidence_1)
+        loss = loss_fn(y_hat[train_mask], y[train_mask])
 
         print(f"Epoch: {epoch_i} ")
         print(
-            f"Train_loss: {np.mean(epoch_loss):.4f}, acc: {acc_fn(y_hat[0][train_mask], y[train_mask]):.4f}",
+            f"Train_loss: {np.mean(epoch_loss):.4f}, acc: {acc_fn(y_hat[train_mask], y[train_mask]):.4f}",
             flush=True,
         )
-        test_accuracy.append(acc_fn(y_hat[0][test_mask], y[test_mask]))
+        current_test_acc = acc_fn(y_hat[test_mask], y[test_mask])
+        test_accuracy.append(current_test_acc)
+        
+        # Update best test accuracy
+        test_acc_value = current_test_acc.item() if torch.is_tensor(current_test_acc) else current_test_acc
+        if test_acc_value > best_test_acc:
+            best_test_acc = test_acc_value
+            best_test_acc_epoch = epoch_i
+            # Save best model state (deep copy)
+            best_model_state = copy.deepcopy(model.state_dict())
+        
+        # Track best accuracy up to epoch 200
+        if epoch_i <= 200:
+            if test_acc_value > best_test_acc_epoch200:
+                best_test_acc_epoch200 = test_acc_value
 
-        loss = loss_fn(y_hat[0][test_mask], y[test_mask])
+        loss = loss_fn(y_hat[test_mask], y[test_mask])
         print(
-            f"Test_loss: {loss:.4f}, Test_acc: {acc_fn(y_hat[0][test_mask], y[test_mask]):.4f}",
+            f"Test_loss: {loss:.4f}, Test_acc: {current_test_acc:.4f}",
             flush=True,
         )
 
 print(f"Total took {time.perf_counter() - begin} seconds.")
 model.eval()
-y_hat = model(x)
-y_hat = y_hat[0].argmax(dim=1).cpu().numpy()
+y_hat = model(x, incidence_1)
+y_hat = y_hat.argmax(dim=1).cpu().numpy()
 cm = sklearn.metrics.confusion_matrix(y.cpu(),y_hat)
 # confusion_matrixes.append(cm)
 
@@ -781,6 +607,60 @@ for i, v in enumerate([x.cpu() for x in test_accuracy]):
         print("%f, " % (v) , end="")
     else:
         print("%f]" % v)
+
+# Save best test accuracy and args to file
+# Create filename based on args
+filename_parts = [f"results_{dataset}"]
+if use_arnoldis:
+    filename_parts.append(f"a{eigenvectors}")
+if use_random_walk_pe:
+    filename_parts.append(f"w{anchorNodes}_{numWalks}")
+filename_parts.append(f"e{num_epochs}")
+filename_parts.append(uuid.uuid4().hex[:4])  # Short UUID (4 chars)
+random_filename = "_".join(filename_parts) + ".json"
+results = {
+    "best_test_acc": float(best_test_acc),
+    "best_test_acc_epoch": int(best_test_acc_epoch),
+    "best_test_acc_epoch200": float(best_test_acc_epoch200),
+    "args": {
+        "use_arnoldis": use_arnoldis,
+        "eigenvectors": eigenvectors if use_arnoldis else -1,
+        "use_random_walk_pe": use_random_walk_pe,
+        "anchorNodes": anchorNodes if use_random_walk_pe else -1,
+        "numWalks": numWalks if use_random_walk_pe else -1,
+        "num_epochs": num_epochs,
+        "command_line": " ".join(sys.argv)
+    },
+    "all_test_acc": [float(x.cpu().item() if torch.is_tensor(x) else x) for x in test_accuracy],
+    "total_time_seconds": time.perf_counter() - begin
+}
+
+# Determine output directory
+output_dir = model_output_dir if model_output_dir else "."
+os.makedirs(output_dir, exist_ok=True)
+
+# Save results JSON
+output_json_path = os.path.join(output_dir, random_filename)
+with open(output_json_path, 'w') as f:
+    json.dump(results, f, indent=2)
+
+# Save model if requested
+model_filename = None
+if save_model and best_model_state is not None:
+    model_filename = random_filename.replace('.json', '.pt')
+    model_path = os.path.join(output_dir, model_filename)
+    torch.save({
+        'model_state_dict': best_model_state,
+        'best_test_acc': best_test_acc,
+        'best_test_acc_epoch': best_test_acc_epoch,
+        'best_test_acc_epoch200': best_test_acc_epoch200,
+        'args': results['args']
+    }, model_path)
+    print(f"Model saved to: {model_path}")
+
+print(f"\nBest test accuracy: {best_test_acc:.4f} at epoch {best_test_acc_epoch}")
+print(f"Best test accuracy (up to epoch 200): {best_test_acc_epoch200:.4f}")
+print(f"Results saved to: {output_json_path}")
 
 
 
